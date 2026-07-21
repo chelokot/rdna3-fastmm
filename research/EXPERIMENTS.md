@@ -16,11 +16,13 @@ belong in `benchmarks/results/`.
   transform.
 - `12288³`: dynamic 33.82 ms versus 38.15 ms (`1.128×`); prepacked 31.15 ms
   (`1.225×`).
-- `16384³`: dynamic 74.96 ms versus 91.19 ms (`1.216×`); prepacked 70.58 ms
-  (`1.292×`).
+- The clean report at commit `83dbaf778d596f31f253bd69b73bad1a8d1002b3`
+  measured `16384³` dynamic at 74.04 ms versus 90.79 ms (`1.226×`) and
+  prepacked at 70.37 ms (`1.290×`).
 - All 16 output macroblocks were sampled against CPU FP32. Candidate relative
   L2 error was 0.00250 at `16384³`; no non-finite values were observed.
-- Decision: whitelist only the measured square shapes and tested runtime.
+- Decision: whitelist only the measured square shapes and tested runtime. Raw
+  report: [`rx7900xtx-rank49-both-16384-83dbaf7.json`](../benchmarks/results/rx7900xtx-rank49-both-16384-83dbaf7.json).
 
 ### E002 — Rank-7 Strassen family: rejected for real shapes
 

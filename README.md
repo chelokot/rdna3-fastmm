@@ -20,14 +20,14 @@ two input transforms and one output reconstruction.
 |---|---|---:|---:|---:|
 | `12288³` | dynamic | 38.15 ms | 33.82 ms | 1.128× |
 | `12288³` | prepacked right | 38.15 ms | 31.15 ms | 1.225× |
-| `16384³` | dynamic | 91.19 ms | 74.96 ms | 1.216× |
-| `16384³` | prepacked right | 91.19 ms | 70.58 ms | 1.292× |
+| `16384³` | dynamic | 90.79 ms | 74.04 ms | 1.226× |
+| `16384³` | prepacked right | 90.79 ms | 70.37 ms | 1.290× |
 | `16384³` | rank-343 prepacked right | 91.36 ms | **68.60 ms** | **1.332×** |
 
 These are medians from the development machine with PyTorch 2.9.1+ROCm 6.4,
 Triton 3.5.1, and an RX 7900 XTX. The `16384³` prepacked result corresponds to
-124.6 classical-equivalent TFLOP/s, not 124.6 physically executed TFLOP/s.
-The rank-49 leaf work runs at about 95.4 TFLOP/s; transforms account for the
+125.0 classical-equivalent TFLOP/s, not 125.0 physically executed TFLOP/s.
+The rank-49 leaf work runs at about 95.7 TFLOP/s; transforms account for the
 rest of the latency. Sampled relative L2 error against CPU FP32 was 0.00250,
 versus 0.000214 for `torch.mm`.
 
@@ -56,7 +56,7 @@ output = plan.run_packed(left, packed_right, workspace)
 
 `Rank49Plan.is_recommended()` is the performance gate. Callers should fall back
 to `torch.mm` whenever it returns false. Packing a `16384²` right operand costs
-about 5.7 ms and breaks even after two uses.
+about 5.8 ms and breaks even after two uses.
 
 `Rank343Plan` exposes the faster `16384³` prepacked candidate with the same API.
 

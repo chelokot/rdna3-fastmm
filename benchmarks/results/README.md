@@ -7,3 +7,5 @@ hashes, and FP32 correctness samples.
 
 - [`rx7900xtx-rank343-prepacked-16384-f5f3e88.json`](rx7900xtx-rank343-prepacked-16384-f5f3e88.json):
   clean rank-343 MFMA prepacked result at `16384³`.
+- [`rx7900xtx-rank49-both-16384-83dbaf7.json`](rx7900xtx-rank49-both-16384-83dbaf7.json):
+  clean rank-49 dynamic and prepacked result at `16384³`.
