@@ -224,6 +224,26 @@
       }
     },
     {
+      "id": "ltx-2.3-blueprint-upscaled-19968-mlp-down",
+      "model": "LTX-2.3",
+      "workload": "Official blueprint second stage after 2x spatial upscale",
+      "projection": "MLP down projection",
+      "shape": [19968, 16384, 4096],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 2,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Reverse orientation of the 19968-token second-stage MLP projection.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_lt.py#L60-L80",
+          "local:///var/mnt/second/ai/comfyui-ltx23/ComfyUI/blueprints/Text%20to%20Video%20(LTX-2.3).json"
+        ]
+      }
+    },
+    {
       "id": "qwen-image-edit-2511-one-reference-mlp-up",
       "model": "Qwen-Image-Edit-2511",
       "workload": "Approximately 1MP target with one reference",
@@ -257,6 +277,26 @@
       "evidence": {
         "kind": "architecture-derived",
         "note": "Approximate upper token envelope for one target plus three roughly 1MP references.",
+        "references": [
+          "https://huggingface.co/Qwen/Qwen-Image-Edit-2511/blob/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9/transformer/config.json",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_qwen.py#L53-L106"
+        ]
+      }
+    },
+    {
+      "id": "qwen-image-edit-2511-three-references-mlp-down",
+      "model": "Qwen-Image-Edit-2511",
+      "workload": "Approximately 1MP target with three references",
+      "projection": "MLP down projection",
+      "shape": [16384, 12288, 3072],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 2,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Reverse orientation of the approximate target-plus-three-references token envelope.",
         "references": [
           "https://huggingface.co/Qwen/Qwen-Image-Edit-2511/blob/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9/transformer/config.json",
           "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_qwen.py#L53-L106"

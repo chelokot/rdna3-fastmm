@@ -317,7 +317,7 @@ def algorithm_metrics(
             "candidate_external": "Inductor external_matmul out-callable",
         }[name]
         if name == "candidate_dynamic" and operator == "linear":
-            api = f"{type(plan).__name__}.run_linear(..., output=...)"
+            api = f"{type(plan).__name__}.run_linear(...)"
         entry: dict[str, object] = {
             "api": api,
             "timing": asdict(timing),
@@ -431,12 +431,11 @@ def benchmark(
             if operator == "linear":
                 if not isinstance(plan, Rank49Plan) or weight is None:
                     raise AssertionError("linear plan was not initialized")
-                plan.run_linear(
+                outputs["candidate_dynamic"] = plan.run_linear(
                     left,
                     weight,
                     workspaces["dynamic"],
                     bias,
-                    outputs["candidate_dynamic"],
                 )
             else:
                 plan.run(
