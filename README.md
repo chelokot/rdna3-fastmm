@@ -21,6 +21,7 @@ two input transforms and one output reconstruction.
 | `12288³` | dynamic | 38.15 ms | 33.82 ms | 1.128× |
 | `12288³` | prepacked right | 38.15 ms | 31.15 ms | 1.225× |
 | `16384³` | dynamic | 90.79 ms | 74.04 ms | 1.226× |
+| `16384³` | Inductor external callable | 93.40 ms | 74.57 ms | 1.253× |
 | `16384³` | prepacked right | 90.79 ms | 70.37 ms | 1.290× |
 | `16384³` | rank-343 prepacked right | 91.36 ms | **68.60 ms** | **1.332×** |
 
@@ -77,6 +78,12 @@ for the private-API boundary and upstream path.
 PyTorch 2.9.1 disables `torch.compile` on Python 3.14. Use Python 3.12 or 3.13
 for the compile backend; the direct runtime and benchmark harness work on the
 development machine's Python 3.14 installation.
+
+The clean external-callable benchmark includes Python plan construction and
+workspace allocation. It measured 74.57 ms against 93.40 ms for `torch.mm`,
+only about 0.53 ms slower than the separately measured direct dynamic path.
+This validates the callable's overhead, not end-to-end Inductor selection under
+the unsupported Python 3.14 runtime.
 
 ## Reproducing the baseline
 

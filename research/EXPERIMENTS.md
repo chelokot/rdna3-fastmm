@@ -98,3 +98,16 @@ belong in `benchmarks/results/`.
 - 1024/4 regressed to 18.08 ms; smaller 64–256 position variants remained near
   9.17–9.55 ms.
 - Decision: use 512 positions and 8 warps for rank-343 right prepacking.
+
+### E012 — Inductor external callable overhead: accepted
+
+- Clean report at commit `afdacb46e3a511443da53b05c82808e755b111a2`.
+- The exact module-level callable registered through `external_matmul`, including
+  plan construction and workspace allocation, measured 74.57 ms versus
+  93.40 ms for PyTorch at `16384³` (`1.253×`).
+- Its median was about 0.53 ms above the clean direct dynamic runtime median.
+- Correctness matched the direct rank-49 path: relative L2 `2.50e-3`, maximum
+  absolute error 1.27, and no non-finite values across all 16 output forms.
+- Decision: integration overhead preserves the material win. End-to-end
+  `torch.compile` selection remains pending a Python 3.12 or 3.13 ROCm runtime.
+  Raw report: [`rx7900xtx-rank49-external-16384-afdacb4.json`](../benchmarks/results/rx7900xtx-rank49-external-16384-afdacb4.json).

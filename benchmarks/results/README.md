@@ -9,3 +9,5 @@ hashes, and FP32 correctness samples.
   clean rank-343 MFMA prepacked result at `16384³`.
 - [`rx7900xtx-rank49-both-16384-83dbaf7.json`](rx7900xtx-rank49-both-16384-83dbaf7.json):
   clean rank-49 dynamic and prepacked result at `16384³`.
+- [`rx7900xtx-rank49-external-16384-afdacb4.json`](rx7900xtx-rank49-external-16384-afdacb4.json):
+  clean rank-49 Inductor external-callable result at `16384³`.
