@@ -29,6 +29,42 @@ def test_rank_49_shape_rejects_nonpositive_dimensions() -> None:
         MatrixShape.from_dimensions(4, 0, 4, 4)
 
 
+@pytest.mark.parametrize(
+    ("shape", "has_bias"),
+    (
+        ((4096, 4096, 12288), False),
+        ((5120, 4608, 12288), False),
+        ((8214, 4608, 12288), False),
+        ((5632, 12288, 4608), False),
+        ((16384, 3072, 12288), True),
+        ((19968, 4096, 16384), True),
+        ((19968, 16384, 4096), True),
+    ),
+)
+def test_rank_49_measured_linear_families_are_eligible(
+    shape: tuple[int, int, int], has_bias: bool
+) -> None:
+    assert Rank49Plan.has_measured_linear_win(shape, has_bias=has_bias)
+
+
+@pytest.mark.parametrize(
+    ("shape", "has_bias"),
+    (
+        ((4095, 4096, 12288), False),
+        ((5119, 4608, 12288), False),
+        ((9217, 4608, 12288), False),
+        ((5631, 12288, 4608), False),
+        ((16384, 3072, 12288), False),
+        ((19968, 4096, 16384), False),
+        ((19968, 16384, 4096), False),
+    ),
+)
+def test_rank_49_unmeasured_linear_families_are_ineligible(
+    shape: tuple[int, int, int], has_bias: bool
+) -> None:
+    assert not Rank49Plan.has_measured_linear_win(shape, has_bias=has_bias)
+
+
 def test_rank_49_plan_rejects_cpu_device() -> None:
     with pytest.raises(ValueError, match="ROCm"):
         Rank49Plan(4, 4, 4, torch.device("cpu"))

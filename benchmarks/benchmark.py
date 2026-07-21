@@ -363,16 +363,25 @@ def benchmark(
         raise ValueError("linear benchmarking currently supports rank49 only")
     if operator == "linear" and any(mode != "dynamic" for mode in modes):
         raise ValueError("linear benchmarking currently supports dynamic mode only")
-    recommendations = {
-        "dynamic": plan.is_recommended(),
-        "external": (
-            algorithm == "rank49"
-            and dtype == torch.float16
-            and compute_dtype == torch.float16
-            and plan.is_recommended()
-        ),
-        "prepacked": plan.is_recommended(prepacked_right=True),
-    }
+    if operator == "linear":
+        if not isinstance(plan, Rank49Plan):
+            raise AssertionError("linear plan was not initialized")
+        recommendations = {
+            "dynamic": plan.is_linear_recommended(has_bias=linear_bias),
+            "external": False,
+            "prepacked": False,
+        }
+    else:
+        recommendations = {
+            "dynamic": plan.is_recommended(),
+            "external": (
+                algorithm == "rank49"
+                and dtype == torch.float16
+                and compute_dtype == torch.float16
+                and plan.is_recommended()
+            ),
+            "prepacked": plan.is_recommended(prepacked_right=True),
+        }
     if not allow_unrecommended and any(not recommendations[mode] for mode in modes):
         raise RuntimeError(
             "shape or runtime is outside the measured dispatch whitelist"

@@ -20,12 +20,28 @@ Every other invocation calls `torch.mm(..., out=out)`. This makes an external
 choice safe even though Inductor constructs it for more than the whitelisted
 shapes.
 
+The measured ComfyUI path has a different operator contract: BF16
+`torch.nn.functional.linear(input, weight, bias)` with native contiguous
+`weight[N,K]`, optional bias, and FP16 circuit leaves. `Rank49Plan.run_linear`
+implements that contract directly and `is_linear_recommended` carries its
+measured dispatch policy. It cannot use `external_matmul`: biased Linear lowers
+through `addmm`, and the ordinary right operand is the non-contiguous
+`weight.T` view.
+
+The planned compile integration is a pre-AOT rewrite of eligible Linear nodes
+to a public `torch.library.triton_op` wrapper. That preserves row-major weights,
+keeps unsupported nodes in ordinary Inductor, and gives the custom operator an
+explicit fake/meta contract. The legacy private `external_matmul` hook remains
+only for the original FP16 `mm` evidence until this path is implemented and
+tested under a supported Python runtime.
+
 ## Current limits
 
 - `external_matmul` and `torch._inductor.compile` are private PyTorch APIs. The
   backend pins and tests the exact supported runtime rather than pretending the
   hook is stable.
-- The hook covers `aten.mm`, not fused `aten.addmm`.
+- The legacy hook covers `aten.mm`, not `aten.addmm` or `F.linear`; the measured
+  BF16 runtime path is not wired into `torch.compile` yet.
 - The external call is opaque to fusion and Inductor's memory planner. Its
   temporary workspace is allocated through PyTorch's caching allocator.
 - CUDA graphs are disabled while the callable performs Python-side plan and

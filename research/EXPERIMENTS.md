@@ -111,3 +111,85 @@ belong in `benchmarks/results/`.
 - Decision: integration overhead preserves the material win. End-to-end
   `torch.compile` selection remains pending a Python 3.12 or 3.13 ROCm runtime.
   Raw report: [`rx7900xtx-rank49-external-16384-afdacb4.json`](../benchmarks/results/rx7900xtx-rank49-external-16384-afdacb4.json).
+
+### E013 — BF16 input/output with FP16 leaves: accepted for research
+
+- Native BF16 rank-49 leaves at `257×263×269` produced relative L2 error
+  `2.02e-2`, versus `1.66e-3` for PyTorch BF16.
+- Converting transformed planes and leaf products to FP16 reduced candidate
+  error to `2.76e-3` on the same case.
+- At `4097×4096×12288`, the mixed path measured `4.72 ms` versus `3.85 ms`
+  for a contiguous-right `torch.mm`; native BF16 leaves were both slower and
+  approximately 12.5 times less accurate than the baseline.
+- Decision: retain only BF16 input/output with FP16 transformed planes and leaf
+  products. Keep it outside dispatch until tested through the real Linear
+  contract.
+
+### E014 — Contiguous-right real-shape screen: rejected as a dispatch contract
+
+- LTX-like `3510×4096×16384` reached `1.101×` with a prepacked right operand,
+  but the dynamic path reached only `0.864×`.
+- Ideogram-like `16824×4608×12288` reached only `1.031×` dynamically.
+- Rank-49 expands a packed right operand by `49/16 = 3.0625×`; one
+  `4096×16384` BF16 weight needs approximately 392 MiB after packing.
+- Real `F.linear` stores contiguous `weight[N,K]` and presents `weight.T` to
+  GEMM. Materializing a contiguous transpose or caching every expanded model
+  weight is not practical on a 24 GB card.
+- Decision: no dispatch from these numbers. Implement a native weight-layout
+  transform and benchmark the allocating `F.linear` API.
+
+### E015 — Native Linear weight transform: 2×1024/4 selected
+
+- The first coalesced two-dimensional kernel used a `32×32` tile and took
+  approximately 3.75 ms to transform an Ideogram `weight[12288,4608]`; the full
+  `8214×4608×12288` candidate reached only `0.892×`.
+- Sweeps over both tile axes found `2×1024` with four warps at approximately
+  1.41 ms. Large contiguous output spans matter because the transform writes
+  49 planes for 16 source blocks.
+- The generated kernel reads native row-major `weight[N,K]`, writes the logical
+  right-transform planes directly, and never materializes `weight.T`.
+- Bias is fused into the certificate-derived output reconstruction kernel.
+- Decision: select `2×1024`, four warps, one stage for the measured model-width
+  families.
+
+### E016 — BF16 real-model Linear corpus: accepted selectively
+
+- Runtime: RX 7900 XTX `gfx1100`, PyTorch 2.9.1+ROCm 6.4, Triton 3.5.1,
+  BF16 inputs/outputs, FP16 leaves.
+- Baseline: allocating `torch.nn.functional.linear` with native row-major
+  weight and the model's real bias setting.
+- Clean commit: `feadc08fd5442ac7aa1436556416579d86322f46`.
+
+| Model path | Shape | PyTorch | Rank-49 | Speedup | Decision |
+|---|---:|---:|---:|---:|---|
+| HiDream-O1 MLP up | `4096×4096×12288` | 5.48 ms | 5.16 ms | `1.062×` | exact shape |
+| Ideogram 4 MLP up | `8214×4608×12288` | 12.17 ms | 10.16 ms | `1.198×` | accept family |
+| Ideogram 4 MLP down | `8214×12288×4608` | 14.97 ms | 12.63 ms | `1.185×` | accept family |
+| LTX-2.3 second-stage up | `19968×4096×16384` | 33.46 ms | 26.70 ms | `1.253×` | exact shape |
+| LTX-2.3 second-stage down | `19968×16384×4096` | 34.32 ms | 27.54 ms | `1.246×` | exact shape |
+| Qwen Edit three-ref up | `16384×3072×12288` | 14.68 ms | 13.56 ms | `1.082×` | exact shape |
+| Qwen Edit three-ref down | `16384×12288×3072` | 15.29 ms | 16.05 ms | `0.953×` | reject |
+
+- Ideogram boundary sweeps accepted no-bias up projections for
+  `M=5120..9216` and down projections for `M=5632..9216`. Every tested point in
+  those intervals exceeded `1.09×`; `M=4704` reached only `1.03–1.04×` and is
+  not dispatched.
+- LTX at `M=4992` reached `0.954×` up and `0.746×` down. Qwen at approximately
+  `M=8192` reached only `1.013×`. HiDream's reverse projection reached
+  `0.978×`. All are rejected.
+- Across accepted clean reports, sampled candidate relative L2 was
+  `2.62e-3..2.95e-3`, at most 1.82 times the corresponding PyTorch error, with
+  no non-finite values.
+- The LTX up path peaked at approximately 5.29 GB of process GPU allocation.
+  End-to-end model benefit remains unmeasured.
+- Decision: expose a separate BF16 Linear recommendation gate containing only
+  these measured shapes and intervals.
+
+### E017 — Rank-343 mixed-precision real shape: rejected
+
+- At `16824×4608×12288`, BF16 input/output with FP16 leaves measured 20.91 ms
+  against 17.99 ms for PyTorch (`0.860×`).
+- Process peak allocation was approximately 4.75 GB and candidate relative L2
+  was `3.07e-3`.
+- Decision: rank-343 remains restricted to its original FP16 prepacked
+  `16384³` result.

@@ -91,6 +91,24 @@ class PackedRight:
     source_shape: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class LinearShapeFamily:
+    minimum_rows: int
+    maximum_rows: int
+    inner: int
+    columns: int
+    has_bias: bool
+
+    def matches(self, shape: tuple[int, int, int], has_bias: bool) -> bool:
+        rows, inner, columns = shape
+        return (
+            self.minimum_rows <= rows <= self.maximum_rows
+            and inner == self.inner
+            and columns == self.columns
+            and has_bias == self.has_bias
+        )
+
+
 class _Plan(ABC):
     algorithm: str
     rank: int
@@ -450,6 +468,30 @@ class Rank49Plan(_Plan):
         }
     )
     prepacked_shapes = dynamic_shapes | {(8_192, 8_192, 8_192)}
+    linear_shape_families = (
+        LinearShapeFamily(4_096, 4_096, 4_096, 12_288, False),
+        LinearShapeFamily(5_120, 9_216, 4_608, 12_288, False),
+        LinearShapeFamily(5_632, 9_216, 12_288, 4_608, False),
+        LinearShapeFamily(16_384, 16_384, 3_072, 12_288, True),
+        LinearShapeFamily(19_968, 19_968, 4_096, 16_384, True),
+        LinearShapeFamily(19_968, 19_968, 16_384, 4_096, True),
+    )
+
+    @classmethod
+    def has_measured_linear_win(
+        cls, shape: tuple[int, int, int], *, has_bias: bool
+    ) -> bool:
+        return any(
+            family.matches(shape, has_bias) for family in cls.linear_shape_families
+        )
+
+    def is_linear_recommended(self, *, has_bias: bool) -> bool:
+        return (
+            self.dtype == torch.bfloat16
+            and self.compute_dtype == torch.float16
+            and self.has_measured_linear_win(self.shape.dimensions, has_bias=has_bias)
+            and is_tested_runtime(self.device)
+        )
 
     def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
         shape = self.shape
