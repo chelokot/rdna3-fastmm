@@ -12,7 +12,7 @@ lint:
 	$(RUFF) format --check src tools tests benchmarks research/prototypes --exclude src/rdna3_fastmm/generated
 
 typecheck:
-	$(MYPY) src/rdna3_fastmm/certificate.py benchmarks/corpus.py tools tests
+	$(MYPY) src/rdna3_fastmm/certificate.py benchmarks/corpus.py benchmarks/run_corpus.py tools tests
 
 test:
 	$(PYTEST)
