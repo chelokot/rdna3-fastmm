@@ -92,9 +92,10 @@ def _literal[LiteralValue: str](
     value: object, allowed: set[LiteralValue], context: str
 ) -> LiteralValue:
     parsed = _string(value, context)
-    if parsed not in allowed:
-        raise ValueError(f"{context} must be one of {sorted(allowed)}")
-    return cast(LiteralValue, parsed)
+    for allowed_value in allowed:
+        if parsed == allowed_value:
+            return allowed_value
+    raise ValueError(f"{context} must be one of {sorted(allowed)}")
 
 
 def _string_tuple(value: object, context: str) -> tuple[str, ...]:
