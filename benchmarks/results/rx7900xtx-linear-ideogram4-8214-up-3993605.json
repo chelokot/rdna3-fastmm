@@ -1,0 +1,494 @@
+{
+  "schema_version": 2,
+  "generated_at_utc": "2026-07-21T11:51:15.548606+00:00",
+  "provenance": {
+    "git_commit": "399360532cabf86e286a3366a95224ab3f9902ec",
+    "git_dirty": false,
+    "certificate_path": "certificates/4x4x4_rank49_159add/certificate.json",
+    "certificate_sha256": "a3c4121dfd09607045255628dd94b60133c24c46b65f1089e89c6564ba522561",
+    "generated_module_path": "src/rdna3_fastmm/generated/rank49_4x4x4.py",
+    "generated_module_sha256": "6012928376bf980ddbcd648d27d1b56dab4027f5b235982a9f5839a3c6a9a85b"
+  },
+  "runtime": {
+    "python": "3.14.4",
+    "torch": "2.9.1+rocm6.4",
+    "hip": "6.4.43484-123eb5128",
+    "triton": "3.5.1",
+    "algorithm": "rank49-v1",
+    "linear_implementation": "triton-op",
+    "input_output_dtype": "bfloat16",
+    "compute_dtype": "float16"
+  },
+  "device": {
+    "name": "AMD Radeon Graphics",
+    "architecture": "gfx1100",
+    "multiprocessor_count": 48,
+    "total_memory_bytes": 25753026560
+  },
+  "environment": {
+    "HIP_VISIBLE_DEVICES": null,
+    "PYTORCH_TUNABLEOP_ENABLED": null,
+    "PYTORCH_TUNABLEOP_FILENAME": null,
+    "TORCH_BLAS_PREFER_HIPBLASLT": null
+  },
+  "protocol": {
+    "seed": 0,
+    "input_distribution": "independent standard normal rounded to bfloat16",
+    "input_output_dtype": "bfloat16",
+    "compute_dtype": "float16",
+    "warmup_rounds": 3,
+    "measured_rounds": 9,
+    "order_schedule": [
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ]
+    ],
+    "timing_method": "one operation per HIP event pair",
+    "operator": "linear",
+    "weight_layout": "out_in",
+    "bias": false,
+    "correctness_reference": "CPU FP32 tile matmul from original inputs",
+    "tile_policy": "centered 8x8 tile in each of 16 output macroblocks"
+  },
+  "case": {
+    "shape": [
+      8214,
+      4608,
+      12288
+    ],
+    "operator": "linear",
+    "recommended": {
+      "dynamic": true,
+      "external": false,
+      "prepacked": false
+    },
+    "memory": {
+      "estimated_required_bytes": 1789754880,
+      "free_before_bytes": 20394803200,
+      "free_after_bytes": 18043895808,
+      "process_peak_allocated_bytes": 2026362880,
+      "dynamic_workspace_bytes": 1197073920,
+      "prepacked_workspace_bytes": 850257408,
+      "packed_right_bytes": 346816512
+    },
+    "algorithms": {
+      "torch_linear": {
+        "api": "torch.nn.functional.linear(input, weight, bias)",
+        "timing": {
+          "raw_ms": [
+            12.911980628967285,
+            12.079143524169922,
+            12.379606246948242,
+            12.236515045166016,
+            12.069304466247559,
+            12.282126426696777,
+            12.017582893371582,
+            12.773550033569336,
+            12.612078666687012
+          ],
+          "median_ms": 12.282126426696777,
+          "first_quartile_ms": 12.079143524169922,
+          "third_quartile_ms": 12.612078666687012
+        },
+        "effective_classical_tflops": 75.73642545236153
+      },
+      "candidate_dynamic": {
+        "api": "rdna3_fastmm::linear triton_op",
+        "timing": {
+          "raw_ms": [
+            10.44916820526123,
+            9.761941909790039,
+            9.942052841186523,
+            9.790962219238281,
+            10.405688285827637,
+            10.11959457397461,
+            10.623459815979004,
+            10.561269760131836,
+            10.179475784301758
+          ],
+          "median_ms": 10.179475784301758,
+          "first_quartile_ms": 9.942052841186523,
+          "third_quartile_ms": 10.44916820526123
+        },
+        "effective_classical_tflops": 91.38037873684137,
+        "speedup": 1.2065578510081643,
+        "executed_leaf_tflops": 69.98013755743347
+      }
+    },
+    "packing": null,
+    "correctness": {
+      "aggregate": {
+        "torch_linear": {
+          "sample_count": 1024,
+          "relative_l2_error": 0.001624303955382314,
+          "maximum_absolute_error": 0.490753173828125,
+          "nonfinite_count": 0
+        },
+        "candidate_dynamic": {
+          "sample_count": 1024,
+          "relative_l2_error": 0.002749703206772422,
+          "maximum_absolute_error": 0.7683868408203125,
+          "nonfinite_count": 0
+        }
+      },
+      "candidate_to_baseline_error_ratio": {
+        "candidate_dynamic": 1.6928501575465424
+      },
+      "per_tile": [
+        {
+          "macroblock": [
+            0,
+            0
+          ],
+          "row_start": 1023,
+          "column_start": 1532,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.001625846576392553,
+              "maximum_absolute_error": 0.454437255859375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.00347762653918249,
+              "maximum_absolute_error": 0.6169624328613281,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            0,
+            1
+          ],
+          "row_start": 1023,
+          "column_start": 4604,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015716530983566031,
+              "maximum_absolute_error": 0.4312896728515625,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0017250995819059736,
+              "maximum_absolute_error": 0.4312896728515625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            0,
+            2
+          ],
+          "row_start": 1023,
+          "column_start": 7676,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0014375052255529589,
+              "maximum_absolute_error": 0.24863433837890625,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.001570971832194723,
+              "maximum_absolute_error": 0.25844573974609375,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            0,
+            3
+          ],
+          "row_start": 1023,
+          "column_start": 10748,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0012181985582156885,
+              "maximum_absolute_error": 0.22859954833984375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0012187989187066627,
+              "maximum_absolute_error": 0.22859954833984375,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            0
+          ],
+          "row_start": 3077,
+          "column_start": 1532,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0016944941973949135,
+              "maximum_absolute_error": 0.3778228759765625,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0030841628287356215,
+              "maximum_absolute_error": 0.4911632537841797,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            1
+          ],
+          "row_start": 3077,
+          "column_start": 4604,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0019256500800350922,
+              "maximum_absolute_error": 0.4338836669921875,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.003247612555125836,
+              "maximum_absolute_error": 0.585662841796875,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            2
+          ],
+          "row_start": 3077,
+          "column_start": 7676,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015673765093944633,
+              "maximum_absolute_error": 0.309967041015625,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0017287061744010546,
+              "maximum_absolute_error": 0.3138580322265625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            3
+          ],
+          "row_start": 3077,
+          "column_start": 10748,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015245031345339484,
+              "maximum_absolute_error": 0.244232177734375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0018220829490865776,
+              "maximum_absolute_error": 0.2846832275390625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            2,
+            0
+          ],
+          "row_start": 5131,
+          "column_start": 1532,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0016723139081373838,
+              "maximum_absolute_error": 0.430328369140625,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0037287609901444836,
+              "maximum_absolute_error": 0.7683868408203125,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            2,
+            1
+          ],
+          "row_start": 5131,
+          "column_start": 4604,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.00150858974717835,
+              "maximum_absolute_error": 0.2496795654296875,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0015564368443334335,
+              "maximum_absolute_error": 0.2496795654296875,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            2,
+            2
+          ],
+          "row_start": 5131,
+          "column_start": 7676,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015279058349672513,
+              "maximum_absolute_error": 0.363861083984375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0029312522729136718,
+              "maximum_absolute_error": 0.5927467346191406,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            2,
+            3
+          ],
+          "row_start": 5131,
+          "column_start": 10748,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0017998879522570295,
+              "maximum_absolute_error": 0.4837646484375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0020533143134812515,
+              "maximum_absolute_error": 0.4837646484375,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            3,
+            0
+          ],
+          "row_start": 7184,
+          "column_start": 1532,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.001992817689259997,
+              "maximum_absolute_error": 0.490753173828125,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.003719547785051295,
+              "maximum_absolute_error": 0.630523681640625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            3,
+            1
+          ],
+          "row_start": 7184,
+          "column_start": 4604,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.001478351250439396,
+              "maximum_absolute_error": 0.265380859375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.003124415289565603,
+              "maximum_absolute_error": 0.5418853759765625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            3,
+            2
+          ],
+          "row_start": 7184,
+          "column_start": 7676,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0012794668297528159,
+              "maximum_absolute_error": 0.23413848876953125,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.003418518083206166,
+              "maximum_absolute_error": 0.683013916015625,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            3,
+            3
+          ],
+          "row_start": 7184,
+          "column_start": 10748,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0019793820064336466,
+              "maximum_absolute_error": 0.4749755859375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0033074905011276474,
+              "maximum_absolute_error": 0.5751190185546875,
+              "nonfinite_count": 0
+            }
+          }
+        }
+      ]
+    }
+  }
+}

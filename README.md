@@ -16,17 +16,16 @@ win outside its measured dispatch policy.
 
 The first ComfyUI-oriented corpus covers exact or evidence-derived shapes from
 HiDream-O1, Ideogram 4, LTX-2.3, and Qwen-Image-Edit-2511. Clean results at
-commit `feadc08fd5442ac7aa1436556416579d86322f46` compare the allocating
-`torch.nn.functional.linear` API against the allocating FastMM API.
+commit `399360532cabf86e286a3366a95224ab3f9902ec` compare the allocating
+`torch.nn.functional.linear` API against the public allocating
+`rdna3_fastmm::linear` Triton operator used by the compile integration.
 
 | Workload | Shape `M×K×N` | PyTorch `F.linear` | RDNA3 FastMM | Speedup |
 |---|---:|---:|---:|---:|
-| HiDream-O1 4MP, MLP up | `4096×4096×12288` | 5.48 ms | 5.16 ms | 1.062× |
-| Ideogram 4 high-res, MLP up | `8214×4608×12288` | 12.17 ms | 10.16 ms | 1.198× |
-| Ideogram 4 high-res, MLP down | `8214×12288×4608` | 14.97 ms | 12.63 ms | 1.185× |
-| LTX-2.3 upscaled stage, MLP up | `19968×4096×16384` | 33.46 ms | 26.70 ms | **1.253×** |
-| LTX-2.3 upscaled stage, MLP down | `19968×16384×4096` | 34.32 ms | 27.54 ms | **1.246×** |
-| Qwen Edit, three-reference MLP up | `16384×3072×12288` | 14.68 ms | 13.56 ms | 1.082× |
+| Ideogram 4 high-res, MLP up | `8214×4608×12288` | 12.28 ms | 10.18 ms | **1.207×** |
+| Ideogram 4 high-res, MLP down | `8214×12288×4608` | 15.36 ms | 11.29 ms | **1.359×** |
+| LTX-2.3 upscaled stage, MLP up | `19968×4096×16384` | 33.24 ms | 25.61 ms | **1.298×** |
+| LTX-2.3 upscaled stage, MLP down | `19968×16384×4096` | 34.10 ms | 27.44 ms | **1.242×** |
 
 These are individual operator medians, not end-to-end model speedups. The
 largest measured path uses about 5.29 GB of process GPU memory. Sampled
@@ -34,9 +33,12 @@ candidate relative L2 error was `2.62e-3` to `2.95e-3` on the LTX pair, with no
 non-finite values; PyTorch's sampled error was `1.64e-3` to `1.68e-3`.
 
 The measured Ideogram no-bias family wins across `M=5120..9216` for the up
-projection and `M=5632..9216` for the down projection. Smaller real cases are
-not dispatched: LTX at `M=4992` lost in both orientations, Qwen at `M≈8192`
-was near parity, and HiDream's down projection lost.
+projection and `M=5632..9216` for the down projection. Clean Triton-op boundary
+runs measured `1.109×` and `1.234×` at the up endpoints, and `1.288×` and
+`1.354×` at the down endpoints. Smaller real cases are not dispatched: LTX at
+`M=4992` lost in both orientations and Qwen at `M≈8192` was near parity.
+HiDream and the large Qwen up projection produced only borderline repeat
+minima around `1.04–1.06×`, so the production gate excludes them.
 
 ## Original square result
 
@@ -123,23 +125,28 @@ The intended user surface is an opt-in compile backend:
 compiled = torch.compile(model, backend="rdna3-fastmm")
 ```
 
-On the pinned PyTorch runtime, the backend adds the legacy FP16 rank-49 callable
-through Inductor's private `external_matmul` hook. It becomes a real `aten.mm`
-autotune choice beside ATen, Triton, and CK. The new BF16 Linear path is exposed
-through the direct typed runtime while its pre-AOT `F.linear` rewrite is built;
-it is not yet selected by `torch.compile`. See
-[the integration design](docs/torch-compile.md) for the boundary and upstream
-path.
+On the pinned PyTorch runtime, the backend rewrites eligible BF16 `F.linear`
+nodes before AOT lowering to the public `rdna3_fastmm::linear` Triton operator.
+Its implementation exposes the transforms, `bmm`, allocations, and
+reconstruction to PyTorch's functional/AOT machinery. Unsupported dtypes,
+layouts, bias settings, and shapes remain ordinary Inductor operations.
+
+The backend also retains the legacy FP16 rank-49 callable through Inductor's
+private `external_matmul` hook for the original square `aten.mm` result. See
+[the integration design](docs/torch-compile.md) for the remaining private-API
+boundary and upstream path.
 
 PyTorch 2.9.1 disables `torch.compile` on Python 3.14. Use Python 3.12 or 3.13
 for the compile backend; the direct runtime and benchmark harness work on the
 development machine's Python 3.14 installation.
 
-The clean external-callable benchmark includes Python plan construction and
+The clean legacy external-callable benchmark includes Python plan construction and
 workspace allocation. It measured 74.57 ms against 93.40 ms for `torch.mm`,
 only about 0.53 ms slower than the separately measured direct dynamic path.
 This validates the callable's overhead, not end-to-end Inductor selection under
-the unsupported Python 3.14 runtime.
+the unsupported Python 3.14 runtime. The BF16 Triton operator and FX rewrite are
+GPU-tested here, but the same Python restriction also blocks final
+`torch.compile` execution on this workstation.
 
 ## Reproducing the baseline
 

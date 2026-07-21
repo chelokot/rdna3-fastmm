@@ -193,3 +193,40 @@ belong in `benchmarks/results/`.
   was `3.07e-3`.
 - Decision: rank-343 remains restricted to its original FP16 prepacked
   `16384³` result.
+
+### E018 — Shape-tuned public Triton Linear operator: accepted
+
+- The native weight transform needs different launch geometry by `(K,N)`:
+  - `(4608,12288)` and `(3072,12288)`: `2×1024`, four warps;
+  - `(12288,4608)` and `(4096,12288)`: `8×512`, eight warps;
+  - `(4096,16384)` and `(16384,4096)`: `4×512`, eight warps.
+- On the Ideogram down orientation, isolated weight transformation fell from
+  approximately 3.35 ms to 1.47 ms.
+- The backend now registers `rdna3_fastmm::linear` through
+  `torch.library.triton_op`, uses `wrap_triton` for generated transforms and
+  reconstruction, and exposes the leaf `torch.bmm` to AOT lowering.
+- A pre-AOT FX pass replaces only static, contiguous BF16 Linear nodes whose
+  flattened shape, orientation, and bias semantics match the measured gate.
+- Clean operator-level results at commit
+  `399360532cabf86e286a3366a95224ab3f9902ec`:
+
+| Model path | Shape | PyTorch | Triton op | Speedup |
+|---|---:|---:|---:|---:|
+| Ideogram up | `8214×4608×12288` | 12.28 ms | 10.18 ms | `1.207×` |
+| Ideogram down | `8214×12288×4608` | 15.36 ms | 11.29 ms | `1.359×` |
+| LTX-2.3 second-stage up | `19968×4096×16384` | 33.24 ms | 25.61 ms | `1.298×` |
+| LTX-2.3 second-stage down | `19968×16384×4096` | 34.10 ms | 27.44 ms | `1.242×` |
+
+- Clean Triton-op boundary results remained positive: Ideogram up measured
+  `1.109×` at `M=5120` and `1.234×` at `M=9216`; down measured `1.288×` at
+  `M=5632` and `1.354×` at `M=9216`.
+- HiDream and Qwen had repeat minima around `1.04–1.06×`. They remain in the
+  corpus and transform tuning table but were removed from the recommendation
+  gate.
+- Direct Inductor validation is blocked by the installed PyTorch 2.9.1 runtime
+  on Python 3.14: Dynamo rejects Python 3.14, while importing the direct
+  Inductor compiler reaches a Python-3.14-incompatible `typing.Union` mutation
+  in PyTorch quantization code. Installing a second ROCm stack solely for this
+  check would consume approximately 15 GB and was deferred.
+- Decision: accept the public operator, strict FX rewrite, Ideogram intervals,
+  and exact LTX shapes. Preserve ordinary Inductor fallback everywhere else.

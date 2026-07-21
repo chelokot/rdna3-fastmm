@@ -28,21 +28,28 @@ measured dispatch policy. It cannot use `external_matmul`: biased Linear lowers
 through `addmm`, and the ordinary right operand is the non-contiguous
 `weight.T` view.
 
-The planned compile integration is a pre-AOT rewrite of eligible Linear nodes
-to a public `torch.library.triton_op` wrapper. That preserves row-major weights,
-keeps unsupported nodes in ordinary Inductor, and gives the custom operator an
-explicit fake/meta contract. The legacy private `external_matmul` hook remains
-only for the original FP16 `mm` evidence until this path is implemented and
-tested under a supported Python runtime.
+The compile integration performs a pre-AOT rewrite of eligible Linear nodes to
+the public `rdna3_fastmm::linear` operator registered with
+`torch.library.triton_op`. That preserves row-major weights, keeps unsupported
+nodes in ordinary Inductor, and gives the custom operator an automatically
+derived fake/meta contract. The operator body uses `wrap_triton` for all three
+generated kernels and an ordinary `torch.bmm` for leaf products, so AOT and
+Inductor can see its allocations and internal operations.
+
+The FX rewrite, eager Triton operator, leading-dimension semantics, bias path,
+fallback policy, and clean operator-level performance are GPU-tested. Full
+Inductor execution remains pending a Python 3.12 or 3.13 ROCm environment:
+PyTorch 2.9.1 rejects Dynamo on Python 3.14, and direct Inductor import also
+fails in PyTorch's quantization package on Python 3.14.
 
 ## Current limits
 
 - `external_matmul` and `torch._inductor.compile` are private PyTorch APIs. The
   backend pins and tests the exact supported runtime rather than pretending the
   hook is stable.
-- The legacy hook covers `aten.mm`, not `aten.addmm` or `F.linear`; the measured
-  BF16 runtime path is not wired into `torch.compile` yet.
-- The external call is opaque to fusion and Inductor's memory planner. Its
+- The private legacy hook covers only `aten.mm`; BF16 Linear uses the separate
+  public custom-operator rewrite.
+- The legacy external call is opaque to fusion and Inductor's memory planner. Its
   temporary workspace is allocated through PyTorch's caching allocator.
 - CUDA graphs are disabled while the callable performs Python-side plan and
   workspace construction.
