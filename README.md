@@ -60,10 +60,15 @@ The intended user surface is an opt-in compile backend:
 compiled = torch.compile(model, backend="rdna3-fastmm")
 ```
 
-Its graph pass replaces only proven-profitable `aten.mm` nodes and compiles the
-remaining graph with standard Inductor. This is an out-of-tree backend, not yet
-an entry in Inductor's internal GEMM autotuner. See [the integration design](docs/torch-compile.md)
-for the boundary and upstream path.
+On the pinned PyTorch runtime, the backend adds the rank-49 callable through
+Inductor's private `external_matmul` hook. It becomes a real `aten.mm` autotune
+choice beside ATen, Triton, and CK; unsupported shapes execute `torch.mm`, and a
+losing candidate is not selected. See [the integration design](docs/torch-compile.md)
+for the private-API boundary and upstream path.
+
+PyTorch 2.9.1 disables `torch.compile` on Python 3.14. Use Python 3.12 or 3.13
+for the compile backend; the direct runtime and benchmark harness work on the
+development machine's Python 3.14 installation.
 
 ## Reproducing the baseline
 
@@ -72,7 +77,8 @@ package without replacing them:
 
 ```bash
 python -m pip install -e . --no-deps
-python benchmarks/benchmark_rank49.py \
+python benchmarks/benchmark.py \
+  --algorithm rank49 \
   --shape 16384,16384,16384 \
   --output benchmarks/results/rank49-16384.json
 ```

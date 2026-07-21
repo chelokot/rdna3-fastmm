@@ -13,8 +13,8 @@ until it has passed every layer.
    kernels checked into `src/rdna3_fastmm/generated/`.
 3. `src/rdna3_fastmm/runtime.py` owns device guards, shape policy, workspace
    allocation, prepacking, alias checks, and kernel launch configuration.
-4. The compile backend rewrites eligible graph nodes to an opaque custom
-   operator and sends the rest of the graph to standard Inductor.
+4. The compile backend injects a versioned callable into Inductor's
+   `external_matmul` choice list and otherwise delegates to standard Inductor.
 5. `benchmarks/` produces machine-readable reports. A dispatch whitelist is
    changed only from clean-tree reports on the tested runtime.
 6. `research/EXPERIMENTS.md` is append-only evidence for successful and failed

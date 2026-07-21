@@ -72,3 +72,26 @@ belong in `benchmarks/results/`.
   default implementation at approximately 57–59 ms.
 - Decision: do not repeat exhaustive library tuning on this workstation; tune
   transform kernels separately and preserve desktop responsiveness.
+
+### E010 — Rank-343 MFMA reconstruction: accepted as prepacked candidate
+
+- Scheme: exact `⟨8,8,8⟩`, rank 343, 1661 additions.
+- Replacing the scalar 343-to-64 output DAG with a padded `352×64` MFMA
+  reconstruction reduced that stage from roughly 14 ms to about 5 ms.
+- With a 1024-position, 8-warp left transform, the productionized prepacked
+  `16384³` path measured 69.18 ms against 92.69 ms for PyTorch (`1.340×`).
+- Classical-equivalent throughput was 127.15 TFLOP/s; executed leaf throughput
+  was 85.18 TFLOP/s.
+- CPU FP32 sampling covered all 64 output forms: relative L2 was `2.91e-3`,
+  maximum absolute error 2.32, and no non-finite values were observed.
+- The exploratory report came from a dirty implementation tree and therefore
+  is not a publishable artifact. Decision: commit the implementation, rerun
+  clean, and whitelist only prepacked `16384³`.
+
+### E011 — Rank-343 right-transform launch sweep: 512/8 selected
+
+- `(block positions, warps)` medians at the `16384³` packing shape included:
+  128/2 9.31 ms, 256/4 9.19 ms, 512/8 8.99 ms, and 1024/8 9.91 ms.
+- 1024/4 regressed to 18.08 ms; smaller 64–256 position variants remained near
+  9.17–9.55 ms.
+- Decision: use 512 positions and 8 warps for rank-343 right prepacking.

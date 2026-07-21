@@ -3,63 +3,23 @@ from fractions import Fraction
 import json
 from pathlib import Path
 import subprocess
-from typing import cast, NotRequired, TypedDict
+from typing import cast
 
+from rdna3_fastmm.certificate import (
+    ComplexityData,
+    expand_linear_map,
+    LinearTerm,
+    ReducedSchemeData,
+    SchemeData,
+)
 
-class SchemeData(TypedDict):
-    n: list[int]
-    m: int
-    z2: bool
-    u: list[list[int]]
-    v: list[list[int]]
-    w: list[list[int]]
-
-
-class LinearTerm(TypedDict):
-    index: int
-    value: int
-
-
-class ComplexityData(TypedDict):
-    naive: int
-    reduced: int
-
-
-class ReducedSchemeData(TypedDict):
-    n: list[int]
-    m: int
-    z2: NotRequired[bool]
-    u_fresh: list[list[LinearTerm]]
-    v_fresh: list[list[LinearTerm]]
-    w_fresh: list[list[LinearTerm]]
-    u: list[list[LinearTerm]]
-    v: list[list[LinearTerm]]
-    w: list[list[LinearTerm]]
-    complexity: NotRequired[ComplexityData]
-
-
-def expand_linear_map(
-    input_count: int,
-    gates: list[list[LinearTerm]],
-    outputs: list[list[LinearTerm]],
-) -> list[list[int]]:
-    signals = [
-        [int(row == column) for column in range(input_count)]
-        for row in range(input_count)
-    ]
-    expressions = gates + outputs
-    expanded_outputs: list[list[int]] = []
-    for expression_index, expression in enumerate(expressions):
-        expanded = [0] * input_count
-        for term in expression:
-            source = signals[term["index"]]
-            for coordinate, coefficient in enumerate(source):
-                expanded[coordinate] += term["value"] * coefficient
-        if expression_index < len(gates):
-            signals.append(expanded)
-        else:
-            expanded_outputs.append(expanded)
-    return expanded_outputs
+__all__ = [
+    "ComplexityData",
+    "LinearTerm",
+    "ReducedSchemeData",
+    "SchemeData",
+    "expand_linear_map",
+]
 
 
 def expand_reduced_scheme(scheme: ReducedSchemeData) -> SchemeData:

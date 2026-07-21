@@ -3,6 +3,7 @@
 | Tensor | Rank | Additions | Backend role | Certificate |
 |---|---:|---:|---|---|
 | `⟨4,4,4⟩` | 49 | 159 | Current dynamic and prepacked baseline | [`4x4x4_rank49_159add`](4x4x4_rank49_159add/) |
+| `⟨8,8,8⟩` | 343 | 1661 | MFMA-reconstructed prepacked candidate | [`8x8x8_rank343_1661add`](8x8x8_rank343_1661add/) |
 
 Every certificate is verified over the integers before its generated kernels
 are accepted. The certificates are public upstream factorizations, not new

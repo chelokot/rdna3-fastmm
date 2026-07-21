@@ -16,11 +16,28 @@ from typing import cast
 import torch
 import triton
 
-from rdna3_fastmm.runtime import PackedRight, Rank49Plan, Rank49Workspace
+from rdna3_fastmm.runtime import (
+    PackedRight,
+    Rank49Plan,
+    Rank343Plan,
+    Workspace,
+)
+from rdna3_fastmm.external_mm import rdna3_rank49_dynamic_v1_out
 
 
-CERTIFICATE_PATH = Path("certificates/4x4x4_rank49_159add/certificate.json")
-GENERATED_MODULE_PATH = Path("src/rdna3_fastmm/generated/rank49_4x4x4.py")
+Plan = Rank49Plan | Rank343Plan
+ARTIFACTS = {
+    "rank49": (
+        Path("certificates/4x4x4_rank49_159add/certificate.json"),
+        Path("src/rdna3_fastmm/generated/rank49_4x4x4.py"),
+        Rank49Plan,
+    ),
+    "rank343": (
+        Path("certificates/8x8x8_rank343_1661add/certificate.json"),
+        Path("src/rdna3_fastmm/generated/rank343_8x8x8.py"),
+        Rank343Plan,
+    ),
+}
 ENVIRONMENT_KEYS = (
     "HIP_VISIBLE_DEVICES",
     "PYTORCH_TUNABLEOP_ENABLED",
@@ -117,10 +134,12 @@ def measure_operations(
     )
 
 
-def macroblock_tile_starts(dimension: int, tile_size: int) -> list[int]:
-    block_size = triton.cdiv(dimension, 4)
+def macroblock_tile_starts(
+    dimension: int, tile_size: int, scheme_size: int
+) -> list[int]:
+    block_size = triton.cdiv(dimension, scheme_size)
     starts: list[int] = []
-    for block_index in range(4):
+    for block_index in range(scheme_size):
         region_start = block_index * block_size
         region_end = min(region_start + block_size, dimension)
         if region_end - region_start < tile_size:
@@ -134,9 +153,10 @@ def validate_outputs(
     right: torch.Tensor,
     outputs: dict[str, torch.Tensor],
     tile_size: int,
+    scheme_size: int,
 ) -> dict[str, object]:
-    row_starts = macroblock_tile_starts(left.shape[0], tile_size)
-    column_starts = macroblock_tile_starts(right.shape[1], tile_size)
+    row_starts = macroblock_tile_starts(left.shape[0], tile_size, scheme_size)
+    column_starts = macroblock_tile_starts(right.shape[1], tile_size, scheme_size)
     left_slabs = [
         left.narrow(0, start, tile_size).contiguous().cpu().float()
         for start in row_starts
@@ -217,7 +237,7 @@ def validate_outputs(
 
 
 def measure_packing(
-    plan: Rank49Plan, right: torch.Tensor
+    plan: Plan, right: torch.Tensor
 ) -> tuple[PackedRight, dict[str, float | int | None]]:
     warmup = plan.pack_right(right, max_free_memory_fraction=1.0)
     torch.cuda.synchronize()
@@ -239,13 +259,15 @@ def measure_packing(
 
 
 def memory_requirement_bytes(
-    shape: tuple[int, int, int], plan: Rank49Plan, modes: tuple[str, ...]
+    shape: tuple[int, int, int], plan: Plan, modes: tuple[str, ...]
 ) -> int:
     rows, inner, columns = shape
     matrix_elements = rows * inner + inner * columns
     matrix_elements += (1 + len(modes)) * rows * columns
     workspace_bytes = 0
     if "dynamic" in modes:
+        workspace_bytes += plan.workspace_bytes
+    if "external" in modes:
         workspace_bytes += plan.workspace_bytes
     if "prepacked" in modes:
         workspace_bytes += plan.prepacked_workspace_bytes + plan.packed_right_bytes
@@ -255,13 +277,13 @@ def memory_requirement_bytes(
 def algorithm_metrics(
     timings: dict[str, TimingSummary],
     shape: tuple[int, int, int],
-    plan: Rank49Plan,
+    plan: Plan,
 ) -> dict[str, object]:
     rows, inner, columns = shape
     classical_flops = 2 * rows * inner * columns
     leaf_flops = (
         2
-        * 49
+        * plan.rank
         * plan.shape.block_rows
         * plan.shape.block_inner
         * plan.shape.block_columns
@@ -271,8 +293,11 @@ def algorithm_metrics(
     for name, timing in timings.items():
         api = {
             "torch_mm": "torch.mm(out=...)",
-            "rank49_dynamic": "Rank49Plan.run(..., output=...)",
-            "rank49_prepacked": "Rank49Plan.run_packed(..., output=...)",
+            "candidate_dynamic": f"{type(plan).__name__}.run(..., output=...)",
+            "candidate_prepacked": (
+                f"{type(plan).__name__}.run_packed(..., output=...)"
+            ),
+            "candidate_external": "Inductor external_matmul out-callable",
         }[name]
         entry: dict[str, object] = {
             "api": api,
@@ -287,6 +312,7 @@ def algorithm_metrics(
 
 
 def benchmark(
+    algorithm: str,
     shape: tuple[int, int, int],
     modes: tuple[str, ...],
     warmups: int,
@@ -301,9 +327,11 @@ def benchmark(
     if dirty and not allow_dirty:
         raise RuntimeError("refusing to benchmark a dirty tree without --allow-dirty")
     device = torch.device("cuda", torch.cuda.current_device())
-    plan = Rank49Plan(*shape, device=device)
+    certificate_path, generated_module_path, plan_type = ARTIFACTS[algorithm]
+    plan = plan_type(*shape, device=device)
     recommendations = {
         "dynamic": plan.is_recommended(),
+        "external": algorithm == "rank49" and plan.is_recommended(),
         "prepacked": plan.is_recommended(prepacked_right=True),
     }
     if not allow_unrecommended and any(not recommendations[mode] for mode in modes):
@@ -329,10 +357,10 @@ def benchmark(
     operations: dict[str, Callable[[], None]] = {
         "torch_mm": lambda: torch.mm(left, right, out=outputs["torch_mm"])
     }
-    workspaces: dict[str, Rank49Workspace] = {}
+    workspaces: dict[str, Workspace] = {}
     packing: dict[str, float | int | None] | None = None
     if "dynamic" in modes:
-        outputs["rank49_dynamic"] = torch.empty(
+        outputs["candidate_dynamic"] = torch.empty(
             (rows, columns), device=device, dtype=torch.float16
         )
         workspaces["dynamic"] = plan.allocate_workspace(max_free_memory_fraction=1.0)
@@ -342,12 +370,23 @@ def benchmark(
                 left,
                 right,
                 workspaces["dynamic"],
-                outputs["rank49_dynamic"],
+                outputs["candidate_dynamic"],
             )
 
-        operations["rank49_dynamic"] = run_dynamic
+        operations["candidate_dynamic"] = run_dynamic
+    if "external" in modes:
+        if algorithm != "rank49":
+            raise ValueError("the external_matmul candidate currently uses rank49")
+        outputs["candidate_external"] = torch.empty(
+            (rows, columns), device=device, dtype=torch.float16
+        )
+
+        def run_external() -> None:
+            rdna3_rank49_dynamic_v1_out(left, right, out=outputs["candidate_external"])
+
+        operations["candidate_external"] = run_external
     if "prepacked" in modes:
-        outputs["rank49_prepacked"] = torch.empty(
+        outputs["candidate_prepacked"] = torch.empty(
             (rows, columns), device=device, dtype=torch.float16
         )
         packed_right, packing = measure_packing(plan, right)
@@ -360,17 +399,17 @@ def benchmark(
                 left,
                 packed_right,
                 workspaces["prepacked"],
-                outputs["rank49_prepacked"],
+                outputs["candidate_prepacked"],
             )
 
-        operations["rank49_prepacked"] = run_prepacked
+        operations["candidate_prepacked"] = run_prepacked
     timings, order_schedule = measure_operations(operations, warmups, rounds)
     torch.cuda.synchronize()
-    correctness = validate_outputs(left, right, outputs, tile_size)
+    correctness = validate_outputs(left, right, outputs, tile_size, plan.scheme_size)
     algorithms = algorithm_metrics(timings, shape, plan)
     if packing is not None:
-        dynamic_name = "rank49_dynamic"
-        prepacked_name = "rank49_prepacked"
+        dynamic_name = "candidate_dynamic"
+        prepacked_name = "candidate_prepacked"
         if dynamic_name in timings:
             saved_ms = (
                 timings[dynamic_name].median_ms - timings[prepacked_name].median_ms
@@ -390,17 +429,17 @@ def benchmark(
         "provenance": {
             "git_commit": git_output("rev-parse", "HEAD"),
             "git_dirty": dirty,
-            "certificate_path": str(CERTIFICATE_PATH),
-            "certificate_sha256": file_sha256(CERTIFICATE_PATH),
-            "generated_module_path": str(GENERATED_MODULE_PATH),
-            "generated_module_sha256": file_sha256(GENERATED_MODULE_PATH),
+            "certificate_path": str(certificate_path),
+            "certificate_sha256": file_sha256(certificate_path),
+            "generated_module_path": str(generated_module_path),
+            "generated_module_sha256": file_sha256(generated_module_path),
         },
         "runtime": {
             "python": platform.python_version(),
             "torch": torch.__version__,
             "hip": torch.version.hip,
             "triton": triton.__version__,
-            "kernel": {"block_elements": 256, "num_warps": 2, "num_stages": 1},
+            "algorithm": plan.algorithm,
         },
         "device": {
             "name": properties.name,
@@ -419,8 +458,8 @@ def benchmark(
             "timing_method": "one operation per HIP event pair",
             "correctness_reference": "CPU FP32 tile matmul from original FP16 inputs",
             "tile_policy": (
-                f"centered {tile_size}x{tile_size} tile in each of 16 rank-49 "
-                "output macroblocks"
+                f"centered {tile_size}x{tile_size} tile in each of "
+                f"{plan.scheme_size**2} output macroblocks"
             ),
         },
         "case": {
@@ -444,9 +483,12 @@ def benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--algorithm", choices=tuple(ARTIFACTS), required=True)
     parser.add_argument("--shape", type=parse_shape, required=True)
     parser.add_argument(
-        "--mode", choices=("dynamic", "prepacked", "both"), default="both"
+        "--mode",
+        choices=("dynamic", "prepacked", "external", "both"),
+        default="both",
     )
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=9)
@@ -466,6 +508,7 @@ def main() -> None:
     modes = ("dynamic", "prepacked") if arguments.mode == "both" else (arguments.mode,)
     torch.set_grad_enabled(False)
     report = benchmark(
+        arguments.algorithm,
         arguments.shape,
         modes,
         arguments.warmups,

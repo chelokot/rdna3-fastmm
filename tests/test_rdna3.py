@@ -3,7 +3,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("triton")
 
-from rdna3_fastmm.runtime import Rank49Plan, Rank49Shape
+from rdna3_fastmm.runtime import MatrixShape, Rank49Plan, Rank343Plan
 
 
 def has_tested_rdna3_runtime() -> bool:
@@ -17,16 +17,16 @@ def has_tested_rdna3_runtime() -> bool:
 
 
 def test_rank_49_shape_uses_padded_quarters() -> None:
-    shape = Rank49Shape.from_dimensions(257, 263, 269)
+    shape = MatrixShape.from_dimensions(257, 263, 269, 4)
 
     assert shape.dimensions == (257, 263, 269)
     assert (shape.block_rows, shape.block_inner, shape.block_columns) == (65, 66, 68)
-    assert shape.workspace_elements == 49 * (65 * 66 + 66 * 68 + 65 * 68)
+    assert shape.workspace_elements(49) == 49 * (65 * 66 + 66 * 68 + 65 * 68)
 
 
 def test_rank_49_shape_rejects_nonpositive_dimensions() -> None:
     with pytest.raises(ValueError, match="positive"):
-        Rank49Shape.from_dimensions(4, 0, 4)
+        MatrixShape.from_dimensions(4, 0, 4, 4)
 
 
 def test_rank_49_plan_rejects_cpu_device() -> None:
@@ -81,3 +81,29 @@ def test_rank_49_random_nondivisible_shape_has_bounded_error() -> None:
     assert torch.isfinite(candidate).all()
     assert candidate_error / reference_norm < 0.005
     assert baseline_error / reference_norm < 0.001
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_343_dynamic_and_packed_match_exact_small_product() -> None:
+    torch.manual_seed(17)
+    shape = (5, 6, 7)
+    device = torch.device("cuda")
+    left = torch.randint(-2, 3, shape[:2], device=device, dtype=torch.float16)
+    right = torch.randint(-2, 3, shape[1:], device=device, dtype=torch.float16)
+    reference = (left.float() @ right.float()).half()
+    plan = Rank343Plan(*shape, device=device)
+    dynamic_workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
+    packed = plan.pack_right(right, max_free_memory_fraction=0.1)
+    packed_workspace = plan.allocate_workspace(
+        max_free_memory_fraction=0.1, prepacked_right=True
+    )
+
+    torch.testing.assert_close(
+        plan.run(left, right, dynamic_workspace), reference, rtol=0, atol=0.001
+    )
+    torch.testing.assert_close(
+        plan.run_packed(left, packed, packed_workspace),
+        reference,
+        rtol=0,
+        atol=0.001,
+    )

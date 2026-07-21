@@ -52,3 +52,25 @@ def test_transposed_kernels_are_opt_in() -> None:
     assert "def left_transform_transposed_kernel(" in module
     assert "def right_transform_transposed_kernel(" in module
     assert "def output_transform_transposed_products_kernel(" in module
+
+
+def test_generate_rank_343_mfma_reconstruction() -> None:
+    certificate = Path("certificates/8x8x8_rank343_1661add/certificate.json")
+    module = generate_module(certificate, output_mode="mfma")
+    tree = ast.parse(module)
+    coefficient_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "MFMA_OUTPUT_COEFFICIENTS"
+    )
+    coefficients = ast.literal_eval(coefficient_assignment.value)
+
+    assert "DIMENSIONS = (8, 8, 8)" in module
+    assert "RANK = 343" in module
+    assert "def output_transform_mfma_kernel(" in module
+    assert "def output_transform_kernel(" not in module
+    assert len(coefficients) == 343
+    assert all(len(row) == 64 for row in coefficients)
+    assert {value for row in coefficients for value in row} == {-1, 0, 1}

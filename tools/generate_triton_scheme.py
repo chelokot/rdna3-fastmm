@@ -3,12 +3,17 @@ import hashlib
 from pathlib import Path
 from typing import Literal, TypedDict
 
-from tools.export_fmm_git_scheme import LinearTerm
-from tools.verify_reduced_scheme import load_reduced_scheme, verify_reduced_scheme
+from rdna3_fastmm.certificate import (
+    expand_linear_map,
+    LinearTerm,
+    load_reduced_scheme,
+    verify_reduced_scheme,
+)
 
 
 ExpressionKind = Literal["gate", "output"]
 SourceKind = Literal["input", "products"]
+OutputMode = Literal["scalar", "mfma", "both"]
 
 
 class ScheduledExpression(TypedDict):
@@ -355,7 +360,102 @@ def generate_transposed_output_kernel(
     return "\n".join(lines)
 
 
-def generate_module(source_path: Path, include_transposed: bool = False) -> str:
+def generate_mfma_output(
+    rank: int,
+    first_size: int,
+    second_size: int,
+    gates: list[list[LinearTerm]],
+    outputs: list[list[LinearTerm]],
+) -> tuple[str, str]:
+    output_count = first_size * second_size
+    if output_count & (output_count - 1) or output_count > 64:
+        raise ValueError(
+            "MFMA reconstruction requires a power-of-two output count ≤ 64"
+        )
+    output_columns = expand_linear_map(rank, gates, outputs)
+    row_major_outputs = [
+        output_columns[column * first_size + row]
+        for row in range(first_size)
+        for column in range(second_size)
+    ]
+    rank_major_coefficients = [
+        tuple(output[term] for output in row_major_outputs) for term in range(rank)
+    ]
+    coefficient_lines = ["MFMA_OUTPUT_COEFFICIENTS = ("]
+    coefficient_lines.extend(
+        f"    {coefficients}," for coefficients in rank_major_coefficients
+    )
+    coefficient_lines.append(")")
+    padded_rank = ((rank + 15) // 16) * 16
+    kernel = f"""@triton.jit
+def output_transform_mfma_kernel(
+    source,
+    coefficients,
+    output,
+    output_row_count: tl.constexpr,
+    output_columns: tl.constexpr,
+    block_height: tl.constexpr,
+    block_width: tl.constexpr,
+    block_positions: tl.constexpr,
+    rank_chunk: tl.constexpr,
+):
+    positions = (
+        tl.program_id(0) * block_positions + tl.arange(0, block_positions)
+    )
+    output_offsets = tl.arange(0, {output_count})
+    plane_elements = block_height * block_width
+    position_mask = positions < plane_elements
+    accumulator = tl.zeros((block_positions, {output_count}), tl.float32)
+    for rank_start in range(0, {padded_rank}, rank_chunk):
+        rank_offsets = rank_start + tl.arange(0, rank_chunk)
+        product_values = tl.load(
+            source
+            + rank_offsets[None, :] * plane_elements
+            + positions[:, None],
+            mask=position_mask[:, None] & (rank_offsets[None, :] < {rank}),
+            other=0.0,
+        ).to(tl.float16)
+        coefficient_values = tl.load(
+            coefficients
+            + rank_offsets[:, None] * {output_count}
+            + output_offsets[None, :],
+            mask=rank_offsets[:, None] < {rank},
+            other=0.0,
+        ).to(tl.float16)
+        accumulator = tl.dot(
+            product_values,
+            coefficient_values,
+            acc=accumulator,
+            out_dtype=tl.float32,
+        )
+    local_rows = positions // block_width
+    local_columns = positions % block_width
+    output_block_rows = output_offsets // {second_size}
+    output_block_columns = output_offsets % {second_size}
+    output_rows = (
+        output_block_rows[None, :] * block_height + local_rows[:, None]
+    )
+    output_column_indices = (
+        output_block_columns[None, :] * block_width + local_columns[:, None]
+    )
+    output_mask = (
+        position_mask[:, None]
+        & (output_rows < output_row_count)
+        & (output_column_indices < output_columns)
+    )
+    tl.store(
+        output + output_rows * output_columns + output_column_indices,
+        accumulator,
+        mask=output_mask,
+    )"""
+    return "\n".join(coefficient_lines), kernel
+
+
+def generate_module(
+    source_path: Path,
+    include_transposed: bool = False,
+    output_mode: OutputMode = "scalar",
+) -> str:
     source = load_reduced_scheme(source_path)
     summary = verify_reduced_scheme(source)
     first_size, shared_size, second_size = summary.dimensions
@@ -390,16 +490,29 @@ def generate_module(source_path: Path, include_transposed: bool = False) -> str:
             "input",
             shared_size,
         ),
-        generate_kernel(
-            "output_transform_kernel",
+    ]
+    if output_mode in ("scalar", "both"):
+        kernels.append(
+            generate_kernel(
+                "output_transform_kernel",
+                rank,
+                second_size,
+                source["w_fresh"],
+                source["w"],
+                "products",
+                first_size,
+            )
+        )
+    if output_mode in ("mfma", "both"):
+        coefficients, mfma_kernel = generate_mfma_output(
             rank,
+            first_size,
             second_size,
             source["w_fresh"],
             source["w"],
-            "products",
-            first_size,
-        ),
-    ]
+        )
+        header += "\n\n" + coefficients
+        kernels.append(mfma_kernel)
     if include_transposed:
         kernels.extend(
             [
@@ -434,9 +547,16 @@ def main() -> None:
     parser.add_argument("certificate", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--include-transposed", action="store_true")
+    parser.add_argument(
+        "--output-mode", choices=("scalar", "mfma", "both"), default="scalar"
+    )
     arguments = parser.parse_args()
     arguments.output.write_text(
-        generate_module(arguments.certificate, arguments.include_transposed)
+        generate_module(
+            arguments.certificate,
+            arguments.include_transposed,
+            arguments.output_mode,
+        )
     )
 
 

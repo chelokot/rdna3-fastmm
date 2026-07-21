@@ -1,38 +1,43 @@
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from types import ModuleType
 
 import torch
 import triton
 
-from rdna3_fastmm.generated import rank49_4x4x4
+from rdna3_fastmm.generated import rank49_4x4x4, rank343_8x8x8
 
 
-_EXPECTED_DIMENSIONS = (4, 4, 4)
-_EXPECTED_RANK = 49
-_EXPECTED_CERTIFICATE_SHA256 = (
-    "a3c4121dfd09607045255628dd94b60133c24c46b65f1089e89c6564ba522561"
+def _validate_generated_module(
+    module: ModuleType,
+    dimensions: tuple[int, int, int],
+    rank: int,
+    certificate_sha256: str,
+) -> None:
+    if (
+        module.DIMENSIONS != dimensions
+        or module.RANK != rank
+        or module.CERTIFICATE_SHA256 != certificate_sha256
+    ):
+        raise RuntimeError("generated kernel metadata does not match the backend")
+
+
+_validate_generated_module(
+    rank49_4x4x4,
+    (4, 4, 4),
+    49,
+    "a3c4121dfd09607045255628dd94b60133c24c46b65f1089e89c6564ba522561",
 )
-if (
-    rank49_4x4x4.DIMENSIONS != _EXPECTED_DIMENSIONS
-    or rank49_4x4x4.RANK != _EXPECTED_RANK
-    or rank49_4x4x4.CERTIFICATE_SHA256 != _EXPECTED_CERTIFICATE_SHA256
-):
-    raise RuntimeError("generated rank-49 kernel metadata does not match the backend")
-
-_SCHEME_SIZE = rank49_4x4x4.DIMENSIONS[0]
-_RANK = rank49_4x4x4.RANK
-_BLOCK_ELEMENTS = 256
-_NUM_WARPS = 2
-_DYNAMIC_SHAPES = frozenset(
-    {
-        (12_288, 12_288, 12_288),
-        (16_384, 16_384, 16_384),
-    }
+_validate_generated_module(
+    rank343_8x8x8,
+    (8, 8, 8),
+    343,
+    "c7afccb09f8491e484af1696c25c809757c4af649ee7220e79f25d1c7afe3955",
 )
-_PREPACKED_SHAPES = _DYNAMIC_SHAPES | {(8_192, 8_192, 8_192)}
 
 
 @dataclass(frozen=True)
-class Rank49Shape:
+class MatrixShape:
     rows: int
     inner: int
     columns: int
@@ -41,25 +46,26 @@ class Rank49Shape:
     block_columns: int
 
     @classmethod
-    def from_dimensions(cls, rows: int, inner: int, columns: int) -> "Rank49Shape":
+    def from_dimensions(
+        cls, rows: int, inner: int, columns: int, scheme_size: int
+    ) -> "MatrixShape":
         if min(rows, inner, columns) < 1:
             raise ValueError("matrix dimensions must be positive")
         return cls(
             rows=rows,
             inner=inner,
             columns=columns,
-            block_rows=triton.cdiv(rows, _SCHEME_SIZE),
-            block_inner=triton.cdiv(inner, _SCHEME_SIZE),
-            block_columns=triton.cdiv(columns, _SCHEME_SIZE),
+            block_rows=triton.cdiv(rows, scheme_size),
+            block_inner=triton.cdiv(inner, scheme_size),
+            block_columns=triton.cdiv(columns, scheme_size),
         )
 
     @property
     def dimensions(self) -> tuple[int, int, int]:
         return self.rows, self.inner, self.columns
 
-    @property
-    def workspace_elements(self) -> int:
-        return _RANK * (
+    def workspace_elements(self, rank: int) -> int:
+        return rank * (
             self.block_rows * self.block_inner
             + self.block_inner * self.block_columns
             + self.block_rows * self.block_columns
@@ -67,7 +73,8 @@ class Rank49Shape:
 
 
 @dataclass
-class Rank49Workspace:
+class Workspace:
+    algorithm: str
     left_transformed: torch.Tensor
     right_transformed: torch.Tensor | None
     products: torch.Tensor
@@ -75,11 +82,18 @@ class Rank49Workspace:
 
 @dataclass(frozen=True)
 class PackedRight:
+    algorithm: str
     transformed: torch.Tensor
     source_shape: tuple[int, int]
 
 
-class Rank49Plan:
+class _Plan(ABC):
+    algorithm: str
+    rank: int
+    scheme_size: int
+    dynamic_shapes: frozenset[tuple[int, int, int]]
+    prepacked_shapes: frozenset[tuple[int, int, int]]
+
     def __init__(
         self,
         rows: int,
@@ -88,18 +102,20 @@ class Rank49Plan:
         device: torch.device,
         dtype: torch.dtype = torch.float16,
     ) -> None:
-        if device.type != "cuda":
-            raise ValueError("the RDNA3 backend requires a CUDA-compatible ROCm device")
+        if (
+            device.type != "cuda"
+            or torch.version.hip is None
+            or not torch.cuda.is_available()
+        ):
+            raise ValueError("the RDNA3 backend requires a ROCm device")
         if dtype != torch.float16:
-            raise ValueError(
-                "the measured rank-49 backend currently supports FP16 only"
-            )
+            raise ValueError("the measured RDNA3 backend currently supports FP16 only")
         device_index = (
             torch.cuda.current_device() if device.index is None else device.index
         )
         self.device = torch.device("cuda", device_index)
         self.dtype = dtype
-        self.shape = Rank49Shape.from_dimensions(rows, inner, columns)
+        self.shape = MatrixShape.from_dimensions(rows, inner, columns, self.scheme_size)
 
     @property
     def workspace_bytes(self) -> int:
@@ -112,26 +128,29 @@ class Rank49Plan:
     @property
     def packed_right_bytes(self) -> int:
         shape = self.shape
-        return _RANK * shape.block_inner * shape.block_columns * 2
+        return self.rank * shape.block_inner * shape.block_columns * self.dtype.itemsize
 
     def is_recommended(self, *, prepacked_right: bool = False) -> bool:
-        shapes = _PREPACKED_SHAPES if prepacked_right else _DYNAMIC_SHAPES
-        return self.shape.dimensions in shapes and _is_tested_runtime(self.device)
+        shapes = self.prepacked_shapes if prepacked_right else self.dynamic_shapes
+        return self.shape.dimensions in shapes and is_tested_runtime(self.device)
 
     def allocate_workspace(
         self,
         max_free_memory_fraction: float = 0.75,
         *,
         prepacked_right: bool = False,
-    ) -> Rank49Workspace:
+    ) -> Workspace:
         workspace_bytes = self._workspace_bytes(prepacked_right)
         self._ensure_memory_budget(
-            workspace_bytes, max_free_memory_fraction, "rank-49 workspace"
+            workspace_bytes,
+            max_free_memory_fraction,
+            f"{self.algorithm} workspace",
         )
         shape = self.shape
-        return Rank49Workspace(
+        return Workspace(
+            algorithm=self.algorithm,
             left_transformed=torch.empty(
-                (_RANK, shape.block_rows, shape.block_inner),
+                (self.rank, shape.block_rows, shape.block_inner),
                 device=self.device,
                 dtype=self.dtype,
             ),
@@ -139,13 +158,13 @@ class Rank49Plan:
                 None
                 if prepacked_right
                 else torch.empty(
-                    (_RANK, shape.block_inner, shape.block_columns),
+                    (self.rank, shape.block_inner, shape.block_columns),
                     device=self.device,
                     dtype=self.dtype,
                 )
             ),
             products=torch.empty(
-                (_RANK, shape.block_rows, shape.block_columns),
+                (self.rank, shape.block_rows, shape.block_columns),
                 device=self.device,
                 dtype=self.dtype,
             ),
@@ -158,22 +177,26 @@ class Rank49Plan:
         self._ensure_memory_budget(
             self.packed_right_bytes,
             max_free_memory_fraction,
-            "rank-49 packed right matrix",
+            f"{self.algorithm} packed right matrix",
         )
         shape = self.shape
         transformed = torch.empty(
-            (_RANK, shape.block_inner, shape.block_columns),
+            (self.rank, shape.block_inner, shape.block_columns),
             device=self.device,
             dtype=self.dtype,
         )
         self._transform_right(right, transformed)
-        return PackedRight(transformed, (shape.inner, shape.columns))
+        return PackedRight(
+            algorithm=self.algorithm,
+            transformed=transformed,
+            source_shape=(shape.inner, shape.columns),
+        )
 
     def run(
         self,
         left: torch.Tensor,
         right: torch.Tensor,
-        workspace: Rank49Workspace,
+        workspace: Workspace,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._validate_left(left)
@@ -205,7 +228,7 @@ class Rank49Plan:
         self,
         left: torch.Tensor,
         right: PackedRight,
-        workspace: Rank49Workspace,
+        workspace: Workspace,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._validate_left(left)
@@ -234,59 +257,17 @@ class Rank49Plan:
         self._reconstruct(workspace.products, result)
         return result
 
+    @abstractmethod
     def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
-        shape = self.shape
-        plane_elements = shape.block_rows * shape.block_inner
-        grid = (triton.cdiv(plane_elements, _BLOCK_ELEMENTS),)
-        rank49_4x4x4.left_transform_kernel[grid](
-            source,
-            output,
-            shape.rows,
-            shape.inner,
-            shape.block_rows,
-            shape.block_inner,
-            shape.block_rows,
-            shape.block_inner,
-            _BLOCK_ELEMENTS,
-            num_warps=_NUM_WARPS,
-            num_stages=1,
-        )
+        raise NotImplementedError
 
+    @abstractmethod
     def _transform_right(self, source: torch.Tensor, output: torch.Tensor) -> None:
-        shape = self.shape
-        plane_elements = shape.block_inner * shape.block_columns
-        grid = (triton.cdiv(plane_elements, _BLOCK_ELEMENTS),)
-        rank49_4x4x4.right_transform_kernel[grid](
-            source,
-            output,
-            shape.inner,
-            shape.columns,
-            shape.block_inner,
-            shape.block_columns,
-            shape.block_inner,
-            shape.block_columns,
-            _BLOCK_ELEMENTS,
-            num_warps=_NUM_WARPS,
-            num_stages=1,
-        )
+        raise NotImplementedError
 
+    @abstractmethod
     def _reconstruct(self, products: torch.Tensor, output: torch.Tensor) -> None:
-        shape = self.shape
-        plane_elements = shape.block_rows * shape.block_columns
-        grid = (triton.cdiv(plane_elements, _BLOCK_ELEMENTS),)
-        rank49_4x4x4.output_transform_kernel[grid](
-            products,
-            output,
-            shape.block_rows,
-            shape.block_columns,
-            shape.rows,
-            shape.columns,
-            shape.block_rows,
-            shape.block_columns,
-            _BLOCK_ELEMENTS,
-            num_warps=_NUM_WARPS,
-            num_stages=1,
-        )
+        raise NotImplementedError
 
     def _validate_left(self, tensor: torch.Tensor) -> None:
         self._validate_tensor(tensor, (self.shape.rows, self.shape.inner), "left")
@@ -306,24 +287,31 @@ class Rank49Plan:
         if not tensor.is_contiguous():
             raise ValueError(f"{name} matrix must be contiguous")
         if tensor.requires_grad:
-            raise ValueError(
-                "the experimental rank-49 backend does not support autograd"
-            )
+            raise ValueError("the experimental RDNA3 backend does not support autograd")
 
-    def _validate_workspace(
-        self, workspace: Rank49Workspace, *, require_right: bool
-    ) -> None:
+    def _validate_workspace(self, workspace: Workspace, *, require_right: bool) -> None:
+        if workspace.algorithm != self.algorithm:
+            raise ValueError("workspace algorithm does not match the plan")
         shape = self.shape
         expected = [
-            (workspace.left_transformed, (_RANK, shape.block_rows, shape.block_inner)),
-            (workspace.products, (_RANK, shape.block_rows, shape.block_columns)),
+            (
+                workspace.left_transformed,
+                (self.rank, shape.block_rows, shape.block_inner),
+            ),
+            (
+                workspace.products,
+                (self.rank, shape.block_rows, shape.block_columns),
+            ),
         ]
         if require_right:
             right_transformed = workspace.right_transformed
             if right_transformed is None:
                 raise ValueError("dynamic execution requires a dynamic workspace")
             expected.append(
-                (right_transformed, (_RANK, shape.block_inner, shape.block_columns))
+                (
+                    right_transformed,
+                    (self.rank, shape.block_inner, shape.block_columns),
+                )
             )
         for tensor, tensor_shape in expected:
             if (
@@ -333,22 +321,24 @@ class Rank49Plan:
                 or not tensor.is_contiguous()
                 or tensor.requires_grad
             ):
-                raise ValueError("workspace does not match the rank-49 plan")
+                raise ValueError("workspace does not match the plan")
         self._validate_separate_storage(*(tensor for tensor, _ in expected))
 
     def _validate_packed_right(self, packed: PackedRight) -> None:
         shape = self.shape
+        if packed.algorithm != self.algorithm:
+            raise ValueError("packed right algorithm does not match the plan")
         if packed.source_shape != (shape.inner, shape.columns):
             raise ValueError("packed right matrix shape does not match the plan")
         transformed = packed.transformed
         if (
-            transformed.shape != (_RANK, shape.block_inner, shape.block_columns)
+            transformed.shape != (self.rank, shape.block_inner, shape.block_columns)
             or transformed.device != self.device
             or transformed.dtype != self.dtype
             or not transformed.is_contiguous()
             or transformed.requires_grad
         ):
-            raise ValueError("packed right matrix does not match the rank-49 plan")
+            raise ValueError("packed right matrix does not match the plan")
 
     def _output(self, output: torch.Tensor | None) -> torch.Tensor:
         shape = (self.shape.rows, self.shape.columns)
@@ -359,13 +349,13 @@ class Rank49Plan:
 
     def _workspace_bytes(self, prepacked_right: bool) -> int:
         shape = self.shape
-        elements = _RANK * (
+        elements = self.rank * (
             shape.block_rows * shape.block_inner
             + shape.block_rows * shape.block_columns
         )
         if not prepacked_right:
-            elements += _RANK * shape.block_inner * shape.block_columns
-        return elements * 2
+            elements += self.rank * shape.block_inner * shape.block_columns
+        return elements * self.dtype.itemsize
 
     def _ensure_memory_budget(
         self, required_bytes: int, max_free_memory_fraction: float, name: str
@@ -392,7 +382,7 @@ class Rank49Plan:
             if any(
                 self._storage_overlaps(tensor, other) for other in tensors[index + 1 :]
             ):
-                raise ValueError("rank-49 work buffers must not overlap")
+                raise ValueError("work buffers must not overlap")
 
     @staticmethod
     def _storage_overlaps(first: torch.Tensor, second: torch.Tensor) -> bool:
@@ -403,7 +393,158 @@ class Rank49Plan:
         return first_start < second_end and second_start < first_end
 
 
-def _is_tested_runtime(device: torch.device) -> bool:
+class Rank49Plan(_Plan):
+    algorithm = "rank49-v1"
+    rank = rank49_4x4x4.RANK
+    scheme_size = rank49_4x4x4.DIMENSIONS[0]
+    dynamic_shapes = frozenset(
+        {
+            (12_288, 12_288, 12_288),
+            (16_384, 16_384, 16_384),
+        }
+    )
+    prepacked_shapes = dynamic_shapes | {(8_192, 8_192, 8_192)}
+
+    def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_elements = 256
+        grid = (triton.cdiv(shape.block_rows * shape.block_inner, block_elements),)
+        rank49_4x4x4.left_transform_kernel[grid](
+            source,
+            output,
+            shape.rows,
+            shape.inner,
+            shape.block_rows,
+            shape.block_inner,
+            shape.block_rows,
+            shape.block_inner,
+            block_elements,
+            num_warps=2,
+            num_stages=1,
+        )
+
+    def _transform_right(self, source: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_elements = 256
+        grid = (triton.cdiv(shape.block_inner * shape.block_columns, block_elements),)
+        rank49_4x4x4.right_transform_kernel[grid](
+            source,
+            output,
+            shape.inner,
+            shape.columns,
+            shape.block_inner,
+            shape.block_columns,
+            shape.block_inner,
+            shape.block_columns,
+            block_elements,
+            num_warps=2,
+            num_stages=1,
+        )
+
+    def _reconstruct(self, products: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_elements = 256
+        grid = (triton.cdiv(shape.block_rows * shape.block_columns, block_elements),)
+        rank49_4x4x4.output_transform_kernel[grid](
+            products,
+            output,
+            shape.block_rows,
+            shape.block_columns,
+            shape.rows,
+            shape.columns,
+            shape.block_rows,
+            shape.block_columns,
+            block_elements,
+            num_warps=2,
+            num_stages=1,
+        )
+
+
+class Rank343Plan(_Plan):
+    algorithm = "rank343-mfma-v1"
+    rank = rank343_8x8x8.RANK
+    scheme_size = rank343_8x8x8.DIMENSIONS[0]
+    dynamic_shapes = frozenset()
+    prepacked_shapes = frozenset({(16_384, 16_384, 16_384)})
+
+    def __init__(
+        self,
+        rows: int,
+        inner: int,
+        columns: int,
+        device: torch.device,
+        dtype: torch.dtype = torch.float16,
+    ) -> None:
+        super().__init__(rows, inner, columns, device, dtype)
+        self._output_coefficients = torch.tensor(
+            rank343_8x8x8.MFMA_OUTPUT_COEFFICIENTS,
+            device=self.device,
+            dtype=self.dtype,
+        )
+
+    def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_elements = 1024
+        grid = (triton.cdiv(shape.block_rows * shape.block_inner, block_elements),)
+        rank343_8x8x8.left_transform_kernel[grid](
+            source,
+            output,
+            shape.rows,
+            shape.inner,
+            shape.block_rows,
+            shape.block_inner,
+            shape.block_rows,
+            shape.block_inner,
+            block_elements,
+            num_warps=8,
+            num_stages=1,
+        )
+
+    def _transform_right(self, source: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_elements = 512
+        grid = (triton.cdiv(shape.block_inner * shape.block_columns, block_elements),)
+        rank343_8x8x8.right_transform_kernel[grid](
+            source,
+            output,
+            shape.inner,
+            shape.columns,
+            shape.block_inner,
+            shape.block_columns,
+            shape.block_inner,
+            shape.block_columns,
+            block_elements,
+            num_warps=8,
+            num_stages=1,
+        )
+
+    def _reconstruct(self, products: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_positions = 128
+        grid = (triton.cdiv(shape.block_rows * shape.block_columns, block_positions),)
+        rank343_8x8x8.output_transform_mfma_kernel[grid](
+            products,
+            self._output_coefficients,
+            output,
+            shape.rows,
+            shape.columns,
+            shape.block_rows,
+            shape.block_columns,
+            block_positions,
+            16,
+            num_warps=2,
+            num_stages=1,
+            matrix_instr_nonkdim=16,
+            kpack=2,
+            waves_per_eu=2,
+        )
+
+
+Rank49Workspace = Workspace
+Rank343Workspace = Workspace
+
+
+def is_tested_runtime(device: torch.device) -> bool:
     hip_version = torch.version.hip
     if hip_version is None or not torch.cuda.is_available():
         return False
