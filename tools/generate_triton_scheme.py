@@ -107,27 +107,36 @@ def generate_kernel(
     outputs: list[list[LinearTerm]],
     source_kind: SourceKind,
     output_block_rows: int,
+    include_bias: bool = False,
 ) -> str:
+    if include_bias and source_kind != "products":
+        raise ValueError("bias is only valid for output reconstruction")
     schedule = schedule_expressions(input_count, gates, outputs)
     lines = [
         "@triton.jit",
         f"def {name}(",
         "    source,",
         "    output,",
-        "    source_row_count: tl.constexpr,",
-        "    source_columns: tl.constexpr,",
-        "    output_row_count: tl.constexpr,",
-        "    output_columns: tl.constexpr,",
-        "    block_height: tl.constexpr,",
-        "    block_width: tl.constexpr,",
-        "    block_elements: tl.constexpr,",
-        "):",
-        "    element_offsets = (",
-        "        tl.program_id(0) * block_elements + tl.arange(0, block_elements)",
-        "    )",
-        "    plane_elements = block_height * block_width",
-        "    element_mask = element_offsets < plane_elements",
     ]
+    if include_bias:
+        lines.append("    bias,")
+    lines.extend(
+        [
+            "    source_row_count: tl.constexpr,",
+            "    source_columns: tl.constexpr,",
+            "    output_row_count: tl.constexpr,",
+            "    output_columns: tl.constexpr,",
+            "    block_height: tl.constexpr,",
+            "    block_width: tl.constexpr,",
+            "    block_elements: tl.constexpr,",
+            "):",
+            "    element_offsets = (",
+            "        tl.program_id(0) * block_elements + tl.arange(0, block_elements)",
+            "    )",
+            "    plane_elements = block_height * block_width",
+            "    element_mask = element_offsets < plane_elements",
+        ]
+    )
     lines.extend(
         [
             "    local_rows = element_offsets // block_width",
@@ -161,6 +170,24 @@ def generate_kernel(
                 f"({block_row} * block_height + local_rows) * output_columns + "
                 f"{block_column} * block_width + local_columns"
             )
+            if include_bias:
+                bias_mask = (
+                    "element_mask & "
+                    f"({block_column} * block_width + local_columns "
+                    "< output_columns)"
+                )
+                lines.extend(
+                    [
+                        f"    bias_{output_index} = tl.load(",
+                        "        bias",
+                        f"        + {block_column} * block_width",
+                        "        + local_columns,",
+                        f"        mask={bias_mask},",
+                        "        other=0.0,",
+                        "    ).to(tl.float32)",
+                    ]
+                )
+                value = f"{value} + bias_{output_index}"
         mask = "element_mask"
         if source_kind == "products":
             mask += (
@@ -172,6 +199,98 @@ def generate_kernel(
             [
                 "    tl.store(",
                 f"        {pointer}, {value}, mask={mask}",
+                "    )",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def weight_input_load_lines(
+    signal_index: int,
+    input_count: int,
+    block_columns: int,
+) -> list[str]:
+    if not 0 <= signal_index < input_count:
+        return []
+    block_row, block_column = divmod(signal_index, block_columns)
+    pointer = (
+        "source + "
+        f"({block_column} * block_width + local_columns[:, None]) "
+        "* source_columns + "
+        f"{block_row} * block_height + local_rows[None, :]"
+    )
+    mask = (
+        f"({block_column} * block_width + local_columns[:, None] "
+        "< source_row_count) & "
+        f"({block_row} * block_height + local_rows[None, :] < source_columns)"
+    )
+    return [
+        f"    signal_{signal_index} = tl.trans(",
+        "        tl.load(",
+        f"            {pointer}, mask={mask}, other=0.0",
+        "        ).to(tl.float32)",
+        "    )",
+    ]
+
+
+def generate_weight_input_kernel(
+    name: str,
+    input_count: int,
+    block_columns: int,
+    gates: list[list[LinearTerm]],
+    outputs: list[list[LinearTerm]],
+) -> str:
+    schedule = schedule_expressions(input_count, gates, outputs)
+    lines = [
+        "@triton.jit",
+        f"def {name}(",
+        "    source,",
+        "    output,",
+        "    source_row_count: tl.constexpr,",
+        "    source_columns: tl.constexpr,",
+        "    block_height: tl.constexpr,",
+        "    block_width: tl.constexpr,",
+        "    block_rows_per_program: tl.constexpr,",
+        "    block_columns_per_program: tl.constexpr,",
+        "):",
+        "    local_rows = (",
+        "        tl.program_id(0) * block_rows_per_program",
+        "        + tl.arange(0, block_rows_per_program)",
+        "    )",
+        "    local_columns = (",
+        "        tl.program_id(1) * block_columns_per_program",
+        "        + tl.arange(0, block_columns_per_program)",
+        "    )",
+        "    plane_elements = block_height * block_width",
+        "    output_offsets = (",
+        "        local_rows[:, None] * block_width + local_columns[None, :]",
+        "    )",
+        "    output_mask = (",
+        "        (local_rows[:, None] < block_height)",
+        "        & (local_columns[None, :] < block_width)",
+        "    )",
+    ]
+    loaded_inputs: set[int] = set()
+    for expression in schedule:
+        for term in expression["terms"]:
+            signal_index = term["index"]
+            if signal_index < input_count and signal_index not in loaded_inputs:
+                lines.extend(
+                    weight_input_load_lines(signal_index, input_count, block_columns)
+                )
+                loaded_inputs.add(signal_index)
+        value = format_expression(expression["terms"])
+        if expression["kind"] == "gate":
+            signal_index = input_count + expression["index"]
+            lines.append(f"    signal_{signal_index} = {value}")
+            continue
+        output_index = expression["index"]
+        lines.extend(
+            [
+                "    tl.store(",
+                f"        output + {output_index} * plane_elements + output_offsets,",
+                f"        {value},",
+                "        mask=output_mask,",
                 "    )",
             ]
         )
@@ -492,16 +611,35 @@ def generate_module(
         ),
     ]
     if output_mode in ("scalar", "both"):
-        kernels.append(
-            generate_kernel(
-                "output_transform_kernel",
-                rank,
-                second_size,
-                source["w_fresh"],
-                source["w"],
-                "products",
-                first_size,
-            )
+        kernels.extend(
+            [
+                generate_weight_input_kernel(
+                    "right_transform_weight_kernel",
+                    shared_size * second_size,
+                    second_size,
+                    source["v_fresh"],
+                    source["v"],
+                ),
+                generate_kernel(
+                    "output_transform_kernel",
+                    rank,
+                    second_size,
+                    source["w_fresh"],
+                    source["w"],
+                    "products",
+                    first_size,
+                ),
+                generate_kernel(
+                    "output_transform_bias_kernel",
+                    rank,
+                    second_size,
+                    source["w_fresh"],
+                    source["w"],
+                    "products",
+                    first_size,
+                    include_bias=True,
+                ),
+            ]
         )
     if output_mode in ("mfma", "both"):
         coefficients, mfma_kernel = generate_mfma_output(

@@ -38,6 +38,10 @@ ARTIFACTS = {
         Rank343Plan,
     ),
 }
+DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
 ENVIRONMENT_KEYS = (
     "HIP_VISIBLE_DEVICES",
     "PYTORCH_TUNABLEOP_ENABLED",
@@ -151,7 +155,9 @@ def macroblock_tile_starts(
 def validate_outputs(
     left: torch.Tensor,
     right: torch.Tensor,
+    bias: torch.Tensor | None,
     outputs: dict[str, torch.Tensor],
+    baseline_name: str,
     tile_size: int,
     scheme_size: int,
 ) -> dict[str, object]:
@@ -173,6 +179,10 @@ def validate_outputs(
     for row_index, row_start in enumerate(row_starts):
         for column_index, column_start in enumerate(column_starts):
             reference = left_slabs[row_index] @ right_slabs[column_index]
+            if bias is not None:
+                reference += (
+                    bias.narrow(0, column_start, tile_size).contiguous().cpu().float()
+                )
             squared_reference += float(torch.sum(reference.double().square()).item())
             tile_algorithms: dict[str, dict[str, float | int]] = {}
             for name, output in outputs.items():
@@ -224,13 +234,13 @@ def validate_outputs(
         )
         for name, value in squared_difference.items()
     }
-    baseline_error = aggregate["torch_mm"].relative_l2_error
+    baseline_error = aggregate[baseline_name].relative_l2_error
     return {
         "aggregate": {name: asdict(summary) for name, summary in aggregate.items()},
         "candidate_to_baseline_error_ratio": {
             name: summary.relative_l2_error / baseline_error
             for name, summary in aggregate.items()
-            if name != "torch_mm"
+            if name != baseline_name
         },
         "per_tile": per_tile,
     }
@@ -259,7 +269,10 @@ def measure_packing(
 
 
 def memory_requirement_bytes(
-    shape: tuple[int, int, int], plan: Plan, modes: tuple[str, ...]
+    shape: tuple[int, int, int],
+    plan: Plan,
+    modes: tuple[str, ...],
+    has_bias: bool,
 ) -> int:
     rows, inner, columns = shape
     matrix_elements = rows * inner + inner * columns
@@ -271,13 +284,16 @@ def memory_requirement_bytes(
         workspace_bytes += plan.workspace_bytes
     if "prepacked" in modes:
         workspace_bytes += plan.prepacked_workspace_bytes + plan.packed_right_bytes
-    return matrix_elements * 2 + workspace_bytes
+    bias_elements = columns if has_bias else 0
+    return (matrix_elements + bias_elements) * plan.dtype.itemsize + workspace_bytes
 
 
 def algorithm_metrics(
     timings: dict[str, TimingSummary],
     shape: tuple[int, int, int],
     plan: Plan,
+    operator: str,
+    baseline_name: str,
 ) -> dict[str, object]:
     rows, inner, columns = shape
     classical_flops = 2 * rows * inner * columns
@@ -288,23 +304,26 @@ def algorithm_metrics(
         * plan.shape.block_inner
         * plan.shape.block_columns
     )
-    baseline_ms = timings["torch_mm"].median_ms
+    baseline_ms = timings[baseline_name].median_ms
     metrics: dict[str, object] = {}
     for name, timing in timings.items():
         api = {
             "torch_mm": "torch.mm(out=...)",
+            "torch_linear": "torch.nn.functional.linear(input, weight, bias)",
             "candidate_dynamic": f"{type(plan).__name__}.run(..., output=...)",
             "candidate_prepacked": (
                 f"{type(plan).__name__}.run_packed(..., output=...)"
             ),
             "candidate_external": "Inductor external_matmul out-callable",
         }[name]
+        if name == "candidate_dynamic" and operator == "linear":
+            api = f"{type(plan).__name__}.run_linear(..., output=...)"
         entry: dict[str, object] = {
             "api": api,
             "timing": asdict(timing),
             "effective_classical_tflops": classical_flops / timing.median_ms / 1e9,
         }
-        if name != "torch_mm":
+        if name != baseline_name:
             entry["speedup"] = baseline_ms / timing.median_ms
             entry["executed_leaf_tflops"] = leaf_flops / timing.median_ms / 1e9
         metrics[name] = entry
@@ -314,6 +333,8 @@ def algorithm_metrics(
 def benchmark(
     algorithm: str,
     shape: tuple[int, int, int],
+    dtype: torch.dtype,
+    compute_dtype: torch.dtype,
     modes: tuple[str, ...],
     warmups: int,
     rounds: int,
@@ -322,23 +343,46 @@ def benchmark(
     max_memory_fraction: float,
     allow_dirty: bool,
     allow_unrecommended: bool,
+    operator: str = "mm",
+    linear_bias: bool = True,
 ) -> dict[str, object]:
     dirty = bool(git_output("status", "--porcelain"))
     if dirty and not allow_dirty:
         raise RuntimeError("refusing to benchmark a dirty tree without --allow-dirty")
     device = torch.device("cuda", torch.cuda.current_device())
     certificate_path, generated_module_path, plan_type = ARTIFACTS[algorithm]
-    plan = plan_type(*shape, device=device)
+    plan = plan_type(
+        *shape,
+        device=device,
+        dtype=dtype,
+        compute_dtype=compute_dtype,
+    )
+    if operator not in {"mm", "linear"}:
+        raise ValueError("operator must be mm or linear")
+    if operator == "linear" and algorithm != "rank49":
+        raise ValueError("linear benchmarking currently supports rank49 only")
+    if operator == "linear" and any(mode != "dynamic" for mode in modes):
+        raise ValueError("linear benchmarking currently supports dynamic mode only")
     recommendations = {
         "dynamic": plan.is_recommended(),
-        "external": algorithm == "rank49" and plan.is_recommended(),
+        "external": (
+            algorithm == "rank49"
+            and dtype == torch.float16
+            and compute_dtype == torch.float16
+            and plan.is_recommended()
+        ),
         "prepacked": plan.is_recommended(prepacked_right=True),
     }
     if not allow_unrecommended and any(not recommendations[mode] for mode in modes):
         raise RuntimeError(
             "shape or runtime is outside the measured dispatch whitelist"
         )
-    required_bytes = memory_requirement_bytes(shape, plan, modes)
+    required_bytes = memory_requirement_bytes(
+        shape,
+        plan,
+        modes,
+        operator == "linear" and linear_bias,
+    )
     free_before, _ = torch.cuda.mem_get_info(device)
     if required_bytes > free_before * max_memory_fraction:
         raise MemoryError(
@@ -349,36 +393,69 @@ def benchmark(
     torch.cuda.manual_seed_all(seed)
     torch.cuda.reset_peak_memory_stats(device)
     rows, inner, columns = shape
-    left = torch.randn((rows, inner), device=device, dtype=torch.float16)
-    right = torch.randn((inner, columns), device=device, dtype=torch.float16)
-    outputs = {
-        "torch_mm": torch.empty((rows, columns), device=device, dtype=torch.float16)
-    }
-    operations: dict[str, Callable[[], None]] = {
-        "torch_mm": lambda: torch.mm(left, right, out=outputs["torch_mm"])
-    }
+    left = torch.randn((rows, inner), device=device, dtype=dtype)
+    if operator == "linear":
+        weight = torch.randn((columns, inner), device=device, dtype=dtype)
+        right = weight.T
+        bias = (
+            torch.randn((columns,), device=device, dtype=dtype) if linear_bias else None
+        )
+        baseline_name = "torch_linear"
+    else:
+        right = torch.randn((inner, columns), device=device, dtype=dtype)
+        weight = None
+        bias = None
+        baseline_name = "torch_mm"
+    outputs = {baseline_name: torch.empty((rows, columns), device=device, dtype=dtype)}
+    if operator == "linear":
+        if weight is None:
+            raise AssertionError("linear tensors were not initialized")
+
+        def run_torch_linear() -> None:
+            outputs[baseline_name] = torch.nn.functional.linear(left, weight, bias)
+
+        operations: dict[str, Callable[[], None]] = {baseline_name: run_torch_linear}
+    else:
+        operations = {
+            baseline_name: lambda: torch.mm(left, right, out=outputs[baseline_name])
+        }
     workspaces: dict[str, Workspace] = {}
     packing: dict[str, float | int | None] | None = None
     if "dynamic" in modes:
         outputs["candidate_dynamic"] = torch.empty(
-            (rows, columns), device=device, dtype=torch.float16
+            (rows, columns), device=device, dtype=dtype
         )
         workspaces["dynamic"] = plan.allocate_workspace(max_free_memory_fraction=1.0)
 
         def run_dynamic() -> None:
-            plan.run(
-                left,
-                right,
-                workspaces["dynamic"],
-                outputs["candidate_dynamic"],
-            )
+            if operator == "linear":
+                if not isinstance(plan, Rank49Plan) or weight is None:
+                    raise AssertionError("linear plan was not initialized")
+                plan.run_linear(
+                    left,
+                    weight,
+                    workspaces["dynamic"],
+                    bias,
+                    outputs["candidate_dynamic"],
+                )
+            else:
+                plan.run(
+                    left,
+                    right,
+                    workspaces["dynamic"],
+                    outputs["candidate_dynamic"],
+                )
 
         operations["candidate_dynamic"] = run_dynamic
     if "external" in modes:
-        if algorithm != "rank49":
-            raise ValueError("the external_matmul candidate currently uses rank49")
+        if (
+            algorithm != "rank49"
+            or dtype != torch.float16
+            or compute_dtype != torch.float16
+        ):
+            raise ValueError("the external_matmul candidate currently uses FP16 rank49")
         outputs["candidate_external"] = torch.empty(
-            (rows, columns), device=device, dtype=torch.float16
+            (rows, columns), device=device, dtype=dtype
         )
 
         def run_external() -> None:
@@ -387,7 +464,7 @@ def benchmark(
         operations["candidate_external"] = run_external
     if "prepacked" in modes:
         outputs["candidate_prepacked"] = torch.empty(
-            (rows, columns), device=device, dtype=torch.float16
+            (rows, columns), device=device, dtype=dtype
         )
         packed_right, packing = measure_packing(plan, right)
         workspaces["prepacked"] = plan.allocate_workspace(
@@ -405,8 +482,16 @@ def benchmark(
         operations["candidate_prepacked"] = run_prepacked
     timings, order_schedule = measure_operations(operations, warmups, rounds)
     torch.cuda.synchronize()
-    correctness = validate_outputs(left, right, outputs, tile_size, plan.scheme_size)
-    algorithms = algorithm_metrics(timings, shape, plan)
+    correctness = validate_outputs(
+        left,
+        right,
+        bias,
+        outputs,
+        baseline_name,
+        tile_size,
+        plan.scheme_size,
+    )
+    algorithms = algorithm_metrics(timings, shape, plan, operator, baseline_name)
     if packing is not None:
         dynamic_name = "candidate_dynamic"
         prepacked_name = "candidate_prepacked"
@@ -424,7 +509,7 @@ def benchmark(
     properties = torch.cuda.get_device_properties(device)
     free_after, total_memory = torch.cuda.mem_get_info(device)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "provenance": {
             "git_commit": git_output("rev-parse", "HEAD"),
@@ -440,6 +525,8 @@ def benchmark(
             "hip": torch.version.hip,
             "triton": triton.__version__,
             "algorithm": plan.algorithm,
+            "input_output_dtype": str(dtype).removeprefix("torch."),
+            "compute_dtype": str(compute_dtype).removeprefix("torch."),
         },
         "device": {
             "name": properties.name,
@@ -450,13 +537,23 @@ def benchmark(
         "environment": {key: os.environ.get(key) for key in ENVIRONMENT_KEYS},
         "protocol": {
             "seed": seed,
-            "input_distribution": "independent standard normal rounded to FP16",
-            "dtype": "float16",
+            "input_distribution": (
+                "independent standard normal rounded to "
+                f"{str(dtype).removeprefix('torch.')}"
+            ),
+            "input_output_dtype": str(dtype).removeprefix("torch."),
+            "compute_dtype": str(compute_dtype).removeprefix("torch."),
             "warmup_rounds": warmups,
             "measured_rounds": rounds,
             "order_schedule": order_schedule,
             "timing_method": "one operation per HIP event pair",
-            "correctness_reference": "CPU FP32 tile matmul from original FP16 inputs",
+            "operator": operator,
+            "weight_layout": "out_in" if operator == "linear" else "inner_columns",
+            "bias": bias is not None,
+            "correctness_reference": (
+                "CPU FP32 tile matmul from original inputs"
+                + (" with FP32 bias addition" if bias is not None else "")
+            ),
             "tile_policy": (
                 f"centered {tile_size}x{tile_size} tile in each of "
                 f"{plan.scheme_size**2} output macroblocks"
@@ -464,6 +561,7 @@ def benchmark(
         },
         "case": {
             "shape": list(shape),
+            "operator": operator,
             "recommended": recommendations,
             "memory": {
                 "estimated_required_bytes": required_bytes,
@@ -485,6 +583,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--algorithm", choices=tuple(ARTIFACTS), required=True)
     parser.add_argument("--shape", type=parse_shape, required=True)
+    parser.add_argument("--operator", choices=("mm", "linear"), default="mm")
+    parser.add_argument("--no-bias", action="store_true")
+    parser.add_argument("--dtype", choices=tuple(DTYPES), default="float16")
+    parser.add_argument("--compute-dtype", choices=tuple(DTYPES))
     parser.add_argument(
         "--mode",
         choices=("dynamic", "prepacked", "external", "both"),
@@ -503,13 +605,21 @@ def main() -> None:
         parser.error("warmups must be positive and rounds must be at least three")
     if arguments.tile_size < 1:
         parser.error("tile size must be positive")
+    if arguments.no_bias and arguments.operator != "linear":
+        parser.error("--no-bias requires --operator linear")
     if not 0 < arguments.max_memory_fraction <= 1:
         parser.error("max memory fraction must be in the interval (0, 1]")
     modes = ("dynamic", "prepacked") if arguments.mode == "both" else (arguments.mode,)
+    dtype = DTYPES[arguments.dtype]
+    compute_dtype = (
+        dtype if arguments.compute_dtype is None else DTYPES[arguments.compute_dtype]
+    )
     torch.set_grad_enabled(False)
     report = benchmark(
         arguments.algorithm,
         arguments.shape,
+        dtype,
+        compute_dtype,
         modes,
         arguments.warmups,
         arguments.rounds,
@@ -518,6 +628,8 @@ def main() -> None:
         arguments.max_memory_fraction,
         arguments.allow_dirty,
         arguments.allow_unrecommended,
+        arguments.operator,
+        not arguments.no_bias,
     )
     serialized = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if arguments.output is None:

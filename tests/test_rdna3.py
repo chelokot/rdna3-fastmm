@@ -84,6 +84,79 @@ def test_rank_49_random_nondivisible_shape_has_bounded_error() -> None:
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_49_bfloat16_inputs_with_float16_leaves_have_bounded_error() -> None:
+    torch.manual_seed(13)
+    shape = (257, 263, 269)
+    device = torch.device("cuda")
+    left = torch.randn(shape[:2], device=device, dtype=torch.bfloat16)
+    right = torch.randn(shape[1:], device=device, dtype=torch.bfloat16)
+    reference = left.float() @ right.float()
+    baseline = left @ right
+    plan = Rank49Plan(
+        *shape,
+        device=device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
+    candidate = plan.run(left, right, workspace)
+
+    candidate_error = torch.linalg.vector_norm(candidate.float() - reference)
+    reference_norm = torch.linalg.vector_norm(reference)
+    baseline_error = torch.linalg.vector_norm(baseline.float() - reference)
+
+    assert workspace.output_dtype == torch.bfloat16
+    assert workspace.compute_dtype == torch.float16
+    assert workspace.left_transformed.dtype == torch.float16
+    assert workspace.right_transformed.dtype == torch.float16
+    assert workspace.products.dtype == torch.float16
+    assert torch.isfinite(candidate).all()
+    assert candidate_error / reference_norm < 0.005
+    assert baseline_error / reference_norm < 0.005
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_49_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
+    torch.manual_seed(19)
+    shape = (257, 263, 269)
+    device = torch.device("cuda")
+    input_tensor = torch.randn(shape[:2], device=device, dtype=torch.bfloat16)
+    weight = torch.randn((shape[2], shape[1]), device=device, dtype=torch.bfloat16)
+    bias = torch.randn(shape[2], device=device, dtype=torch.bfloat16)
+    reference = input_tensor.float() @ weight.float().T + bias.float()
+    baseline = torch.nn.functional.linear(input_tensor, weight, bias)
+    plan = Rank49Plan(
+        *shape,
+        device=device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
+    candidate = plan.run_linear(input_tensor, weight, workspace, bias)
+
+    candidate_error = torch.linalg.vector_norm(candidate.float() - reference)
+    reference_norm = torch.linalg.vector_norm(reference)
+    baseline_error = torch.linalg.vector_norm(baseline.float() - reference)
+
+    assert torch.isfinite(candidate).all()
+    assert candidate_error / reference_norm < 0.005
+    assert baseline_error / reference_norm < 0.005
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_343_rejects_bfloat16_inputs() -> None:
+    with pytest.raises(ValueError, match="does not support"):
+        Rank343Plan(
+            8,
+            8,
+            8,
+            torch.device("cuda"),
+            dtype=torch.bfloat16,
+            compute_dtype=torch.float16,
+        )
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
 def test_rank_343_dynamic_and_packed_match_exact_small_product() -> None:
     torch.manual_seed(17)
     shape = (5, 6, 7)

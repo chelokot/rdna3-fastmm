@@ -75,6 +75,8 @@ class MatrixShape:
 @dataclass
 class Workspace:
     algorithm: str
+    output_dtype: torch.dtype
+    compute_dtype: torch.dtype
     left_transformed: torch.Tensor
     right_transformed: torch.Tensor | None
     products: torch.Tensor
@@ -83,6 +85,8 @@ class Workspace:
 @dataclass(frozen=True)
 class PackedRight:
     algorithm: str
+    source_dtype: torch.dtype
+    compute_dtype: torch.dtype
     transformed: torch.Tensor
     source_shape: tuple[int, int]
 
@@ -91,6 +95,7 @@ class _Plan(ABC):
     algorithm: str
     rank: int
     scheme_size: int
+    precision_pairs: frozenset[tuple[torch.dtype, torch.dtype]]
     dynamic_shapes: frozenset[tuple[int, int, int]]
     prepacked_shapes: frozenset[tuple[int, int, int]]
 
@@ -101,6 +106,7 @@ class _Plan(ABC):
         columns: int,
         device: torch.device,
         dtype: torch.dtype = torch.float16,
+        compute_dtype: torch.dtype | None = None,
     ) -> None:
         if (
             device.type != "cuda"
@@ -108,13 +114,18 @@ class _Plan(ABC):
             or not torch.cuda.is_available()
         ):
             raise ValueError("the RDNA3 backend requires a ROCm device")
-        if dtype != torch.float16:
-            raise ValueError("the measured RDNA3 backend currently supports FP16 only")
+        resolved_compute_dtype = dtype if compute_dtype is None else compute_dtype
+        if (dtype, resolved_compute_dtype) not in self.precision_pairs:
+            raise ValueError(
+                f"{self.algorithm} does not support {dtype} inputs with "
+                f"{resolved_compute_dtype} leaf products"
+            )
         device_index = (
             torch.cuda.current_device() if device.index is None else device.index
         )
         self.device = torch.device("cuda", device_index)
         self.dtype = dtype
+        self.compute_dtype = resolved_compute_dtype
         self.shape = MatrixShape.from_dimensions(rows, inner, columns, self.scheme_size)
 
     @property
@@ -128,11 +139,21 @@ class _Plan(ABC):
     @property
     def packed_right_bytes(self) -> int:
         shape = self.shape
-        return self.rank * shape.block_inner * shape.block_columns * self.dtype.itemsize
+        return (
+            self.rank
+            * shape.block_inner
+            * shape.block_columns
+            * self.compute_dtype.itemsize
+        )
 
     def is_recommended(self, *, prepacked_right: bool = False) -> bool:
         shapes = self.prepacked_shapes if prepacked_right else self.dynamic_shapes
-        return self.shape.dimensions in shapes and is_tested_runtime(self.device)
+        return (
+            self.dtype == torch.float16
+            and self.compute_dtype == torch.float16
+            and self.shape.dimensions in shapes
+            and is_tested_runtime(self.device)
+        )
 
     def allocate_workspace(
         self,
@@ -149,10 +170,12 @@ class _Plan(ABC):
         shape = self.shape
         return Workspace(
             algorithm=self.algorithm,
+            output_dtype=self.dtype,
+            compute_dtype=self.compute_dtype,
             left_transformed=torch.empty(
                 (self.rank, shape.block_rows, shape.block_inner),
                 device=self.device,
-                dtype=self.dtype,
+                dtype=self.compute_dtype,
             ),
             right_transformed=(
                 None
@@ -160,13 +183,13 @@ class _Plan(ABC):
                 else torch.empty(
                     (self.rank, shape.block_inner, shape.block_columns),
                     device=self.device,
-                    dtype=self.dtype,
+                    dtype=self.compute_dtype,
                 )
             ),
             products=torch.empty(
                 (self.rank, shape.block_rows, shape.block_columns),
                 device=self.device,
-                dtype=self.dtype,
+                dtype=self.compute_dtype,
             ),
         )
 
@@ -183,11 +206,13 @@ class _Plan(ABC):
         transformed = torch.empty(
             (self.rank, shape.block_inner, shape.block_columns),
             device=self.device,
-            dtype=self.dtype,
+            dtype=self.compute_dtype,
         )
         self._transform_right(right, transformed)
         return PackedRight(
             algorithm=self.algorithm,
+            source_dtype=self.dtype,
+            compute_dtype=self.compute_dtype,
             transformed=transformed,
             source_shape=(shape.inner, shape.columns),
         )
@@ -275,8 +300,14 @@ class _Plan(ABC):
     def _validate_right(self, tensor: torch.Tensor) -> None:
         self._validate_tensor(tensor, (self.shape.inner, self.shape.columns), "right")
 
+    def _validate_weight(self, tensor: torch.Tensor) -> None:
+        self._validate_tensor(tensor, (self.shape.columns, self.shape.inner), "weight")
+
+    def _validate_bias(self, tensor: torch.Tensor) -> None:
+        self._validate_tensor(tensor, (self.shape.columns,), "bias")
+
     def _validate_tensor(
-        self, tensor: torch.Tensor, shape: tuple[int, int], name: str
+        self, tensor: torch.Tensor, shape: tuple[int, ...], name: str
     ) -> None:
         if tensor.shape != shape:
             raise ValueError(
@@ -290,8 +321,12 @@ class _Plan(ABC):
             raise ValueError("the experimental RDNA3 backend does not support autograd")
 
     def _validate_workspace(self, workspace: Workspace, *, require_right: bool) -> None:
-        if workspace.algorithm != self.algorithm:
-            raise ValueError("workspace algorithm does not match the plan")
+        if (
+            workspace.algorithm != self.algorithm
+            or workspace.output_dtype != self.dtype
+            or workspace.compute_dtype != self.compute_dtype
+        ):
+            raise ValueError("workspace does not match the plan")
         shape = self.shape
         expected = [
             (
@@ -317,7 +352,7 @@ class _Plan(ABC):
             if (
                 tensor.shape != tensor_shape
                 or tensor.device != self.device
-                or tensor.dtype != self.dtype
+                or tensor.dtype != self.compute_dtype
                 or not tensor.is_contiguous()
                 or tensor.requires_grad
             ):
@@ -326,15 +361,19 @@ class _Plan(ABC):
 
     def _validate_packed_right(self, packed: PackedRight) -> None:
         shape = self.shape
-        if packed.algorithm != self.algorithm:
-            raise ValueError("packed right algorithm does not match the plan")
+        if (
+            packed.algorithm != self.algorithm
+            or packed.source_dtype != self.dtype
+            or packed.compute_dtype != self.compute_dtype
+        ):
+            raise ValueError("packed right matrix does not match the plan")
         if packed.source_shape != (shape.inner, shape.columns):
             raise ValueError("packed right matrix shape does not match the plan")
         transformed = packed.transformed
         if (
             transformed.shape != (self.rank, shape.block_inner, shape.block_columns)
             or transformed.device != self.device
-            or transformed.dtype != self.dtype
+            or transformed.dtype != self.compute_dtype
             or not transformed.is_contiguous()
             or transformed.requires_grad
         ):
@@ -355,7 +394,7 @@ class _Plan(ABC):
         )
         if not prepacked_right:
             elements += self.rank * shape.block_inner * shape.block_columns
-        return elements * self.dtype.itemsize
+        return elements * self.compute_dtype.itemsize
 
     def _ensure_memory_budget(
         self, required_bytes: int, max_free_memory_fraction: float, name: str
@@ -397,6 +436,13 @@ class Rank49Plan(_Plan):
     algorithm = "rank49-v1"
     rank = rank49_4x4x4.RANK
     scheme_size = rank49_4x4x4.DIMENSIONS[0]
+    precision_pairs = frozenset(
+        {
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.bfloat16, torch.float16),
+        }
+    )
     dynamic_shapes = frozenset(
         {
             (12_288, 12_288, 12_288),
@@ -441,6 +487,27 @@ class Rank49Plan(_Plan):
             num_stages=1,
         )
 
+    def _transform_weight(self, source: torch.Tensor, output: torch.Tensor) -> None:
+        shape = self.shape
+        block_rows = 2
+        block_columns = 1024
+        grid = (
+            triton.cdiv(shape.block_inner, block_rows),
+            triton.cdiv(shape.block_columns, block_columns),
+        )
+        rank49_4x4x4.right_transform_weight_kernel[grid](
+            source,
+            output,
+            shape.columns,
+            shape.inner,
+            shape.block_inner,
+            shape.block_columns,
+            block_rows,
+            block_columns,
+            num_warps=4,
+            num_stages=1,
+        )
+
     def _reconstruct(self, products: torch.Tensor, output: torch.Tensor) -> None:
         shape = self.shape
         block_elements = 256
@@ -459,11 +526,72 @@ class Rank49Plan(_Plan):
             num_stages=1,
         )
 
+    def _reconstruct_bias(
+        self, products: torch.Tensor, bias: torch.Tensor, output: torch.Tensor
+    ) -> None:
+        shape = self.shape
+        block_elements = 256
+        grid = (triton.cdiv(shape.block_rows * shape.block_columns, block_elements),)
+        rank49_4x4x4.output_transform_bias_kernel[grid](
+            products,
+            output,
+            bias,
+            shape.block_rows,
+            shape.block_columns,
+            shape.rows,
+            shape.columns,
+            shape.block_rows,
+            shape.block_columns,
+            block_elements,
+            num_warps=2,
+            num_stages=1,
+        )
+
+    def run_linear(
+        self,
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        workspace: Workspace,
+        bias: torch.Tensor | None = None,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._validate_left(input_tensor)
+        self._validate_weight(weight)
+        if bias is not None:
+            self._validate_bias(bias)
+        self._validate_workspace(workspace, require_right=True)
+        result = self._output(output)
+        self._validate_output_storage(
+            result,
+            input_tensor,
+            weight,
+            bias,
+            workspace.left_transformed,
+            workspace.products,
+            workspace.right_transformed,
+        )
+        self._transform_left(input_tensor, workspace.left_transformed)
+        right_transformed = workspace.right_transformed
+        if right_transformed is None:
+            raise ValueError("linear execution requires a dynamic workspace")
+        self._transform_weight(weight, right_transformed)
+        torch.bmm(
+            workspace.left_transformed,
+            right_transformed,
+            out=workspace.products,
+        )
+        if bias is None:
+            self._reconstruct(workspace.products, result)
+        else:
+            self._reconstruct_bias(workspace.products, bias, result)
+        return result
+
 
 class Rank343Plan(_Plan):
     algorithm = "rank343-mfma-v1"
     rank = rank343_8x8x8.RANK
     scheme_size = rank343_8x8x8.DIMENSIONS[0]
+    precision_pairs = frozenset({(torch.float16, torch.float16)})
     dynamic_shapes = frozenset()
     prepacked_shapes = frozenset({(16_384, 16_384, 16_384)})
 
@@ -474,12 +602,13 @@ class Rank343Plan(_Plan):
         columns: int,
         device: torch.device,
         dtype: torch.dtype = torch.float16,
+        compute_dtype: torch.dtype | None = None,
     ) -> None:
-        super().__init__(rows, inner, columns, device, dtype)
+        super().__init__(rows, inner, columns, device, dtype, compute_dtype)
         self._output_coefficients = torch.tensor(
             rank343_8x8x8.MFMA_OUTPUT_COEFFICIENTS,
             device=self.device,
-            dtype=self.dtype,
+            dtype=self.compute_dtype,
         )
 
     def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:

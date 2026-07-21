@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "name": "ComfyUI SOTA image and video transformer GEMMs, July 2026",
+  "operator": "torch.nn.functional.linear",
+  "cases": [
+    {
+      "id": "hidream-o1-4mp-mlp-up",
+      "model": "HiDream-O1",
+      "workload": "Official 4MP resolution envelope",
+      "projection": "MLP up projection",
+      "shape": [4096, 4096, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Largest exact 4MP image-token count from the official resolution list; the Qwen3-VL MLP uses bias-free 4096-to-12288 projections.",
+        "references": [
+          "https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev-2604/blob/b6acc2fe452b3120430620dc4354fa442ee081ea/config.json",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/hidream_o1/model.py#L25-L39",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_hidream_o1.py#L19-L39"
+        ]
+      }
+    },
+    {
+      "id": "hidream-o1-4mp-mlp-down",
+      "model": "HiDream-O1",
+      "workload": "Official 4MP resolution envelope",
+      "projection": "MLP down projection",
+      "shape": [4096, 12288, 4096],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Reverse orientation of the largest exact 4MP MLP projection.",
+        "references": [
+          "https://huggingface.co/HiDream-ai/HiDream-O1-Image-Dev-2604/blob/b6acc2fe452b3120430620dc4354fa442ee081ea/config.json",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/hidream_o1/model.py#L25-L39"
+        ]
+      }
+    },
+    {
+      "id": "hidream-o1-4mp-low-envelope-mlp-up",
+      "model": "HiDream-O1",
+      "workload": "Official 4MP resolution envelope",
+      "projection": "MLP up projection",
+      "shape": [3600, 4096, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 2,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Smallest exact image-token count in the official 4MP resolution list.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_hidream_o1.py#L19-L39"
+        ]
+      }
+    },
+    {
+      "id": "ideogram4-local-4704-mlp-up",
+      "model": "Ideogram 4",
+      "workload": "Locally measured image-resolution sweep",
+      "projection": "MLP up projection",
+      "shape": [4704, 4608, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Real image-token count from the local Ideogram sweep; conditional passes add prompt tokens.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/ideogram4/model.py#L194-L297",
+          "local:///var/mnt/second/ai/comfyui-ltx23/run_ideogram_realism_sweep.py#L143"
+        ]
+      }
+    },
+    {
+      "id": "ideogram4-local-4704-mlp-down",
+      "model": "Ideogram 4",
+      "workload": "Locally measured image-resolution sweep",
+      "projection": "MLP down projection",
+      "shape": [4704, 12288, 4608],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Reverse orientation of the same local Ideogram token count.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/ideogram4/model.py#L194-L297",
+          "local:///var/mnt/second/ai/comfyui-ltx23/run_ideogram_realism_sweep.py#L143"
+        ]
+      }
+    },
+    {
+      "id": "ideogram4-local-8214-mlp-up",
+      "model": "Ideogram 4",
+      "workload": "Locally measured high-resolution sweep",
+      "projection": "MLP up projection",
+      "shape": [8214, 4608, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Largest real image-token count found in the local Ideogram sweeps; conditional passes add prompt tokens.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/ideogram4/model.py#L194-L297",
+          "local:///var/mnt/second/ai/comfyui-ltx23/run_ideogram_sweep.py#L234"
+        ]
+      }
+    },
+    {
+      "id": "ideogram4-local-8214-mlp-down",
+      "model": "Ideogram 4",
+      "workload": "Locally measured high-resolution sweep",
+      "projection": "MLP down projection",
+      "shape": [8214, 12288, 4608],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": false,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Reverse orientation of the largest local Ideogram image-token count.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/ideogram4/model.py#L194-L297",
+          "local:///var/mnt/second/ai/comfyui-ltx23/run_ideogram_sweep.py#L234"
+        ]
+      }
+    },
+    {
+      "id": "ltx-2.3-local-720-mlp-up",
+      "model": "LTX-2.3",
+      "workload": "Local 640x384x17 benchmark",
+      "projection": "MLP up projection",
+      "shape": [720, 4096, 16384],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 3,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Exact video-token count from the local low-resolution benchmark.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/lightricks/av_model.py#L378-L418",
+          "local:///var/mnt/second/ai/comfyui-ltx23/scripts/run-ltx23-benchmark.py#L21"
+        ]
+      }
+    },
+    {
+      "id": "ltx-2.3-blueprint-4992-mlp-up",
+      "model": "LTX-2.3",
+      "workload": "Official 768x512x97 blueprint",
+      "projection": "MLP up projection",
+      "shape": [4992, 4096, 16384],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Exact first-stage video-token count from the installed official blueprint.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/lightricks/model.py#L311-L322",
+          "local:///var/mnt/second/ai/comfyui-ltx23/ComfyUI/blueprints/Text%20to%20Video%20(LTX-2.3).json"
+        ]
+      }
+    },
+    {
+      "id": "ltx-2.3-blueprint-4992-mlp-down",
+      "model": "LTX-2.3",
+      "workload": "Official 768x512x97 blueprint",
+      "projection": "MLP down projection",
+      "shape": [4992, 16384, 4096],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 1,
+      "evidence": {
+        "kind": "locally-profiled",
+        "note": "Reverse orientation of the exact first-stage video projection.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/lightricks/model.py#L311-L322",
+          "local:///var/mnt/second/ai/comfyui-ltx23/ComfyUI/blueprints/Text%20to%20Video%20(LTX-2.3).json"
+        ]
+      }
+    },
+    {
+      "id": "ltx-2.3-blueprint-upscaled-19968-mlp-up",
+      "model": "LTX-2.3",
+      "workload": "Official blueprint second stage after 2x spatial upscale",
+      "projection": "MLP up projection",
+      "shape": [19968, 4096, 16384],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 2,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "The 4992-token first stage becomes 19968 tokens after a two-times upscale on both spatial axes.",
+        "references": [
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_lt.py#L60-L80",
+          "local:///var/mnt/second/ai/comfyui-ltx23/ComfyUI/blueprints/Text%20to%20Video%20(LTX-2.3).json"
+        ]
+      }
+    },
+    {
+      "id": "qwen-image-edit-2511-one-reference-mlp-up",
+      "model": "Qwen-Image-Edit-2511",
+      "workload": "Approximately 1MP target with one reference",
+      "projection": "MLP up projection",
+      "shape": [8192, 3072, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 1,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Approximate target-plus-reference token count; each roughly 1MP image contributes about 4096 tokens.",
+        "references": [
+          "https://huggingface.co/Qwen/Qwen-Image-Edit-2511/blob/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9/transformer/config.json",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy/ldm/qwen_image/model.py#L403-L504"
+        ]
+      }
+    },
+    {
+      "id": "qwen-image-edit-2511-three-references-mlp-up",
+      "model": "Qwen-Image-Edit-2511",
+      "workload": "Approximately 1MP target with three references",
+      "projection": "MLP up projection",
+      "shape": [16384, 3072, 12288],
+      "input_output_dtype": "bfloat16",
+      "compute_dtype": "float16",
+      "weight_layout": "out_in",
+      "bias": true,
+      "priority": 2,
+      "evidence": {
+        "kind": "architecture-derived",
+        "note": "Approximate upper token envelope for one target plus three roughly 1MP references.",
+        "references": [
+          "https://huggingface.co/Qwen/Qwen-Image-Edit-2511/blob/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9/transformer/config.json",
+          "https://github.com/Comfy-Org/ComfyUI/blob/b0f9e326af0bf88ea901d0481f581a791a58ccbb/comfy_extras/nodes_qwen.py#L53-L106"
+        ]
+      }
+    }
+  ]
+}

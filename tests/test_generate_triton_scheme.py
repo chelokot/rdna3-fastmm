@@ -29,7 +29,9 @@ def test_generate_rank_49_module() -> None:
     assert "RANK = 49" in module
     assert "def left_transform_kernel(" in module
     assert "def right_transform_kernel(" in module
+    assert "def right_transform_weight_kernel(" in module
     assert "def output_transform_kernel(" in module
+    assert "def output_transform_bias_kernel(" in module
 
 
 def test_checked_in_rank_49_module_matches_generator() -> None:
