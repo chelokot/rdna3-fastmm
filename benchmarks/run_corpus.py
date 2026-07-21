@@ -29,6 +29,8 @@ def benchmark_command(
         "rank49",
         "--operator",
         "linear",
+        "--linear-implementation",
+        "triton-op",
         "--shape",
         ",".join(str(dimension) for dimension in case.shape),
         "--dtype",

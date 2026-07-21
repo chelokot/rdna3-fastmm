@@ -22,6 +22,7 @@ def test_benchmark_command_preserves_linear_contract() -> None:
     assert command[command.index("--shape") + 1] == "8214,4608,12288"
     assert command[command.index("--dtype") + 1] == "bfloat16"
     assert command[command.index("--compute-dtype") + 1] == "float16"
+    assert command[command.index("--linear-implementation") + 1] == "triton-op"
     assert "--no-bias" in command
     assert "--allow-dirty" not in command
 

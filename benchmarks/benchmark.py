@@ -23,6 +23,7 @@ from rdna3_fastmm.runtime import (
     Workspace,
 )
 from rdna3_fastmm.external_mm import rdna3_rank49_dynamic_v1_out
+from rdna3_fastmm.linear import rdna3_linear
 
 
 Plan = Rank49Plan | Rank343Plan
@@ -294,6 +295,7 @@ def algorithm_metrics(
     plan: Plan,
     operator: str,
     baseline_name: str,
+    linear_implementation: str,
 ) -> dict[str, object]:
     rows, inner, columns = shape
     classical_flops = 2 * rows * inner * columns
@@ -317,7 +319,11 @@ def algorithm_metrics(
             "candidate_external": "Inductor external_matmul out-callable",
         }[name]
         if name == "candidate_dynamic" and operator == "linear":
-            api = f"{type(plan).__name__}.run_linear(...)"
+            api = (
+                "rdna3_fastmm::linear triton_op"
+                if linear_implementation == "triton-op"
+                else f"{type(plan).__name__}.run_linear(...)"
+            )
         entry: dict[str, object] = {
             "api": api,
             "timing": asdict(timing),
@@ -345,6 +351,7 @@ def benchmark(
     allow_unrecommended: bool,
     operator: str = "mm",
     linear_bias: bool = True,
+    linear_implementation: str = "triton-op",
 ) -> dict[str, object]:
     dirty = bool(git_output("status", "--porcelain"))
     if dirty and not allow_dirty:
@@ -363,6 +370,8 @@ def benchmark(
         raise ValueError("linear benchmarking currently supports rank49 only")
     if operator == "linear" and any(mode != "dynamic" for mode in modes):
         raise ValueError("linear benchmarking currently supports dynamic mode only")
+    if linear_implementation not in {"plan", "triton-op"}:
+        raise ValueError("linear implementation must be plan or triton-op")
     if operator == "linear":
         if not isinstance(plan, Rank49Plan):
             raise AssertionError("linear plan was not initialized")
@@ -434,18 +443,24 @@ def benchmark(
         outputs["candidate_dynamic"] = torch.empty(
             (rows, columns), device=device, dtype=dtype
         )
-        workspaces["dynamic"] = plan.allocate_workspace(max_free_memory_fraction=1.0)
+        if operator != "linear" or linear_implementation == "plan":
+            workspaces["dynamic"] = plan.allocate_workspace(
+                max_free_memory_fraction=1.0
+            )
 
         def run_dynamic() -> None:
             if operator == "linear":
                 if not isinstance(plan, Rank49Plan) or weight is None:
                     raise AssertionError("linear plan was not initialized")
-                outputs["candidate_dynamic"] = plan.run_linear(
-                    left,
-                    weight,
-                    workspaces["dynamic"],
-                    bias,
-                )
+                if linear_implementation == "triton-op":
+                    outputs["candidate_dynamic"] = rdna3_linear(left, weight, bias)
+                else:
+                    outputs["candidate_dynamic"] = plan.run_linear(
+                        left,
+                        weight,
+                        workspaces["dynamic"],
+                        bias,
+                    )
             else:
                 plan.run(
                     left,
@@ -499,7 +514,14 @@ def benchmark(
         tile_size,
         plan.scheme_size,
     )
-    algorithms = algorithm_metrics(timings, shape, plan, operator, baseline_name)
+    algorithms = algorithm_metrics(
+        timings,
+        shape,
+        plan,
+        operator,
+        baseline_name,
+        linear_implementation,
+    )
     if packing is not None:
         dynamic_name = "candidate_dynamic"
         prepacked_name = "candidate_prepacked"
@@ -533,6 +555,9 @@ def benchmark(
             "hip": torch.version.hip,
             "triton": triton.__version__,
             "algorithm": plan.algorithm,
+            "linear_implementation": (
+                linear_implementation if operator == "linear" else None
+            ),
             "input_output_dtype": str(dtype).removeprefix("torch."),
             "compute_dtype": str(compute_dtype).removeprefix("torch."),
         },
@@ -592,6 +617,11 @@ def main() -> None:
     parser.add_argument("--algorithm", choices=tuple(ARTIFACTS), required=True)
     parser.add_argument("--shape", type=parse_shape, required=True)
     parser.add_argument("--operator", choices=("mm", "linear"), default="mm")
+    parser.add_argument(
+        "--linear-implementation",
+        choices=("triton-op", "plan"),
+        default="triton-op",
+    )
     parser.add_argument("--no-bias", action="store_true")
     parser.add_argument("--dtype", choices=tuple(DTYPES), default="float16")
     parser.add_argument("--compute-dtype", choices=tuple(DTYPES))
@@ -638,6 +668,7 @@ def main() -> None:
         arguments.allow_unrecommended,
         arguments.operator,
         not arguments.no_bias,
+        arguments.linear_implementation,
     )
     serialized = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if arguments.output is None:
