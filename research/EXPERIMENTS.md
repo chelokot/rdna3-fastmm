@@ -78,15 +78,16 @@ belong in `benchmarks/results/`.
 - Scheme: exact `⟨8,8,8⟩`, rank 343, 1661 additions.
 - Replacing the scalar 343-to-64 output DAG with a padded `352×64` MFMA
   reconstruction reduced that stage from roughly 14 ms to about 5 ms.
-- With a 1024-position, 8-warp left transform, the productionized prepacked
-  `16384³` path measured 69.18 ms against 92.69 ms for PyTorch (`1.340×`).
-- Classical-equivalent throughput was 127.15 TFLOP/s; executed leaf throughput
-  was 85.18 TFLOP/s.
+- The clean report at commit `f5f3e889cef2b50b6de149b3e3b3f5126cb0b42e`
+  measured the productionized prepacked `16384³` path at 68.60 ms against
+  91.36 ms for PyTorch (`1.332×`).
+- Classical-equivalent throughput was 128.22 TFLOP/s; executed leaf throughput
+  was 85.89 TFLOP/s.
 - CPU FP32 sampling covered all 64 output forms: relative L2 was `2.91e-3`,
   maximum absolute error 2.32, and no non-finite values were observed.
-- The exploratory report came from a dirty implementation tree and therefore
-  is not a publishable artifact. Decision: commit the implementation, rerun
-  clean, and whitelist only prepacked `16384³`.
+- Right packing took 10.01 ms and packing plus first execution took 78.61 ms.
+- Decision: whitelist only prepacked `16384³`. Raw report:
+  [`rx7900xtx-rank343-prepacked-16384-f5f3e88.json`](../benchmarks/results/rx7900xtx-rank343-prepacked-16384-f5f3e88.json).
 
 ### E011 — Rank-343 right-transform launch sweep: 512/8 selected
 

@@ -22,6 +22,7 @@ two input transforms and one output reconstruction.
 | `12288³` | prepacked right | 38.15 ms | 31.15 ms | 1.225× |
 | `16384³` | dynamic | 91.19 ms | 74.96 ms | 1.216× |
 | `16384³` | prepacked right | 91.19 ms | 70.58 ms | 1.292× |
+| `16384³` | rank-343 prepacked right | 91.36 ms | **68.60 ms** | **1.332×** |
 
 These are medians from the development machine with PyTorch 2.9.1+ROCm 6.4,
 Triton 3.5.1, and an RX 7900 XTX. The `16384³` prepacked result corresponds to
@@ -32,6 +33,11 @@ versus 0.000214 for `torch.mm`.
 
 The backend rejects common LLM shapes where it does not win. For example,
 prepacked `8192×4096×11008` measured 6.96 ms against 6.83 ms for PyTorch.
+
+The rank-343 candidate uses an MFMA output reconstruction. Its clean-tree
+`16384³` report measured 128.22 classical-equivalent TFLOP/s and 85.89 executed
+leaf TFLOP/s. Packing takes 10.01 ms, so packing plus the first multiply still
+finishes in 78.61 ms. Its sampled relative L2 error against CPU FP32 is 0.00291.
 
 ## Direct runtime
 
@@ -51,6 +57,8 @@ output = plan.run_packed(left, packed_right, workspace)
 `Rank49Plan.is_recommended()` is the performance gate. Callers should fall back
 to `torch.mm` whenever it returns false. Packing a `16384²` right operand costs
 about 5.7 ms and breaks even after two uses.
+
+`Rank343Plan` exposes the faster `16384³` prepacked candidate with the same API.
 
 ## PyTorch integration
 
