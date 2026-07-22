@@ -11,7 +11,11 @@ from rdna3_fastmm.external_mm import (
     is_rank49_dynamic_eligible,
     rdna3_rank49_dynamic_v1_out,
 )
-from rdna3_fastmm.linear import RDNA3_LINEAR_OP, rewrite_eligible_linears
+from rdna3_fastmm.linear import (
+    RDNA3_LINEAR_OP,
+    RDNA3_RANK7_LINEAR_OP,
+    rewrite_eligible_linears,
+)
 
 
 def test_external_mm_falls_back_for_ineligible_cpu_input() -> None:
@@ -127,6 +131,31 @@ def test_rewrite_replaces_eligible_bfloat16_linear() -> None:
     targets = {
         node.target for node in graph_module.graph.nodes if node.op == "call_function"
     }
+    assert RDNA3_RANK7_LINEAR_OP in targets
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_rewrite_keeps_rank49_for_exact_ltx_shape() -> None:
+    class Linear(torch.nn.Module):
+        def forward(
+            self,
+            input_tensor: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.nn.functional.linear(input_tensor, weight, bias)
+
+    graph_module = torch.fx.symbolic_trace(Linear())
+    input_tensor = torch.empty((19_968, 4_096), device="cuda", dtype=torch.bfloat16)
+    weight = torch.empty((16_384, 4_096), device="cuda", dtype=torch.bfloat16)
+    bias = torch.empty((16_384,), device="cuda", dtype=torch.bfloat16)
+
+    rewritten = rewrite_eligible_linears(graph_module, [input_tensor, weight, bias])
+
+    assert rewritten == 1
+    targets = {
+        node.target for node in graph_module.graph.nodes if node.op == "call_function"
+    }
     assert RDNA3_LINEAR_OP in targets
 
 
@@ -141,8 +170,33 @@ def test_rewrite_preserves_unmeasured_linear() -> None:
             return torch.nn.functional.linear(input_tensor, weight)
 
     graph_module = torch.fx.symbolic_trace(Linear())
-    input_tensor = torch.empty((4704, 4608), device="cuda", dtype=torch.bfloat16)
+    input_tensor = torch.empty((3072, 4608), device="cuda", dtype=torch.bfloat16)
     weight = torch.empty((12288, 4608), device="cuda", dtype=torch.bfloat16)
+
+    rewritten = rewrite_eligible_linears(graph_module, [input_tensor, weight])
+
+    assert rewritten == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_rewrite_preserves_linear_without_workspace_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Linear(torch.nn.Module):
+        def forward(
+            self,
+            input_tensor: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.nn.functional.linear(input_tensor, weight)
+
+    graph_module = torch.fx.symbolic_trace(Linear())
+    input_tensor = torch.empty((5120, 4608), device="cuda", dtype=torch.bfloat16)
+    weight = torch.empty((12288, 4608), device="cuda", dtype=torch.bfloat16)
+    monkeypatch.setattr(
+        "rdna3_fastmm.linear._has_linear_memory_budget",
+        lambda plan_type, shape, device: False,
+    )
 
     rewritten = rewrite_eligible_linears(graph_module, [input_tensor, weight])
 

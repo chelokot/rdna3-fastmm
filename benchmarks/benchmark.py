@@ -18,16 +18,23 @@ import triton
 
 from rdna3_fastmm.runtime import (
     PackedRight,
+    Rank7Plan,
     Rank49Plan,
     Rank343Plan,
     Workspace,
 )
 from rdna3_fastmm.external_mm import rdna3_rank49_dynamic_v1_out
-from rdna3_fastmm.linear import rdna3_linear
+from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
 
 
-Plan = Rank49Plan | Rank343Plan
+LinearPlan = Rank7Plan | Rank49Plan
+Plan = LinearPlan | Rank343Plan
 ARTIFACTS = {
+    "rank7": (
+        Path("certificates/2x2x2_rank7_15add/certificate.json"),
+        Path("src/rdna3_fastmm/generated/rank7_2x2x2.py"),
+        Rank7Plan,
+    ),
     "rank49": (
         Path("certificates/4x4x4_rank49_159add/certificate.json"),
         Path("src/rdna3_fastmm/generated/rank49_4x4x4.py"),
@@ -38,6 +45,10 @@ ARTIFACTS = {
         Path("src/rdna3_fastmm/generated/rank343_8x8x8.py"),
         Rank343Plan,
     ),
+}
+LINEAR_OPERATORS = {
+    "rank7": rdna3_rank7_linear,
+    "rank49": rdna3_linear,
 }
 DTYPES = {
     "float16": torch.float16,
@@ -274,10 +285,13 @@ def memory_requirement_bytes(
     plan: Plan,
     modes: tuple[str, ...],
     has_bias: bool,
+    retains_replaced_output: bool = False,
 ) -> int:
     rows, inner, columns = shape
     matrix_elements = rows * inner + inner * columns
     matrix_elements += (1 + len(modes)) * rows * columns
+    if retains_replaced_output:
+        matrix_elements += rows * columns
     workspace_bytes = 0
     if "dynamic" in modes:
         workspace_bytes += plan.workspace_bytes
@@ -320,7 +334,11 @@ def algorithm_metrics(
         }[name]
         if name == "candidate_dynamic" and operator == "linear":
             api = (
-                "rdna3_fastmm::linear triton_op"
+                (
+                    "rdna3_fastmm::linear_rank7 triton_op"
+                    if isinstance(plan, Rank7Plan)
+                    else "rdna3_fastmm::linear triton_op"
+                )
                 if linear_implementation == "triton-op"
                 else f"{type(plan).__name__}.run_linear(...)"
             )
@@ -366,14 +384,14 @@ def benchmark(
     )
     if operator not in {"mm", "linear"}:
         raise ValueError("operator must be mm or linear")
-    if operator == "linear" and algorithm != "rank49":
-        raise ValueError("linear benchmarking currently supports rank49 only")
+    if operator == "linear" and algorithm not in LINEAR_OPERATORS:
+        raise ValueError("linear benchmarking requires rank7 or rank49")
     if operator == "linear" and any(mode != "dynamic" for mode in modes):
         raise ValueError("linear benchmarking currently supports dynamic mode only")
     if linear_implementation not in {"plan", "triton-op"}:
         raise ValueError("linear implementation must be plan or triton-op")
     if operator == "linear":
-        if not isinstance(plan, Rank49Plan):
+        if not isinstance(plan, (Rank7Plan, Rank49Plan)):
             raise AssertionError("linear plan was not initialized")
         recommendations = {
             "dynamic": plan.is_linear_recommended(has_bias=linear_bias),
@@ -400,6 +418,7 @@ def benchmark(
         plan,
         modes,
         operator == "linear" and linear_bias,
+        operator == "linear",
     )
     free_before, _ = torch.cuda.mem_get_info(device)
     if required_bytes > free_before * max_memory_fraction:
@@ -450,10 +469,12 @@ def benchmark(
 
         def run_dynamic() -> None:
             if operator == "linear":
-                if not isinstance(plan, Rank49Plan) or weight is None:
+                if not isinstance(plan, (Rank7Plan, Rank49Plan)) or weight is None:
                     raise AssertionError("linear plan was not initialized")
                 if linear_implementation == "triton-op":
-                    outputs["candidate_dynamic"] = rdna3_linear(left, weight, bias)
+                    outputs["candidate_dynamic"] = LINEAR_OPERATORS[algorithm](
+                        left, weight, bias
+                    )
                 else:
                     outputs["candidate_dynamic"] = plan.run_linear(
                         left,

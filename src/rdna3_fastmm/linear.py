@@ -9,10 +9,11 @@ from torch.library import triton_op, wrap_triton
 import triton
 
 from rdna3_fastmm.generated import rank7_2x2x2, rank49_4x4x4
-from rdna3_fastmm.runtime import Rank49Plan, WeightTransformConfig
+from rdna3_fastmm.runtime import Rank7Plan, Rank49Plan, WeightTransformConfig
 
 
 LINEAR_TARGETS = frozenset({torch._C._nn.linear, torch.ops.aten.linear.default})
+MAX_LINEAR_ALLOCATION_FREE_FRACTION = 0.5
 
 
 @dataclass(frozen=True)
@@ -24,55 +25,24 @@ class _LinearKernelConfig:
     weight: WeightTransformConfig
 
 
-_RANK7_DEFAULT_CONFIG = _LinearKernelConfig(
-    scheme_size=2,
-    rank=7,
-    transform_elements=256,
-    transform_warps=2,
-    weight=WeightTransformConfig(8, 512, 8),
-)
-_RANK7_CONFIGS = {
-    (3_072, 12_288): _LinearKernelConfig(
-        scheme_size=2,
-        rank=7,
-        transform_elements=256,
-        transform_warps=2,
-        weight=WeightTransformConfig(8, 256, 4),
-    ),
-    (4_096, 16_384): _LinearKernelConfig(
-        scheme_size=2,
-        rank=7,
-        transform_elements=256,
-        transform_warps=2,
-        weight=WeightTransformConfig(8, 256, 4),
-    ),
-    (4_608, 12_288): _LinearKernelConfig(
-        scheme_size=2,
-        rank=7,
-        transform_elements=512,
-        transform_warps=4,
-        weight=WeightTransformConfig(8, 512, 8),
-    ),
-    (12_288, 4_608): _LinearKernelConfig(
-        scheme_size=2,
-        rank=7,
-        transform_elements=1_024,
-        transform_warps=4,
-        weight=WeightTransformConfig(8, 256, 8),
-    ),
-}
-
-
 def _rank7_kernel_config(inner: int, columns: int) -> _LinearKernelConfig:
-    return _RANK7_CONFIGS.get((inner, columns), _RANK7_DEFAULT_CONFIG)
+    transform = Rank7Plan.transform_config(inner, columns)
+    return _LinearKernelConfig(
+        scheme_size=Rank7Plan.scheme_size,
+        rank=Rank7Plan.rank,
+        transform_elements=transform.block_elements,
+        transform_warps=transform.warps,
+        weight=Rank7Plan.weight_transform_config(inner, columns),
+    )
 
 
 def _rank49_kernel_config(inner: int, columns: int) -> _LinearKernelConfig:
+    transform = Rank49Plan.transform_config(inner, columns)
     return _LinearKernelConfig(
-        scheme_size=4,
-        rank=49,
-        transform_elements=256,
-        transform_warps=2,
+        scheme_size=Rank49Plan.scheme_size,
+        rank=Rank49Plan.rank,
+        transform_elements=transform.block_elements,
+        transform_warps=transform.warps,
         weight=Rank49Plan.weight_transform_config(inner, columns),
     )
 
@@ -201,34 +171,56 @@ def _node_tensor(node: Node) -> torch.Tensor | None:
     return value if isinstance(value, torch.Tensor) else None
 
 
-def _eligible_linear_node(node: Node) -> bool:
+def _has_linear_memory_budget(
+    plan_type: type[Rank7Plan] | type[Rank49Plan],
+    shape: tuple[int, int, int],
+    device: torch.device,
+) -> bool:
+    rows, inner, columns = shape
+    block_rows = triton.cdiv(rows, plan_type.scheme_size)
+    block_inner = triton.cdiv(inner, plan_type.scheme_size)
+    block_columns = triton.cdiv(columns, plan_type.scheme_size)
+    workspace_elements = plan_type.rank * (
+        block_rows * block_inner
+        + block_inner * block_columns
+        + block_rows * block_columns
+    )
+    allocation_bytes = (
+        workspace_elements * torch.float16.itemsize
+        + rows * columns * torch.bfloat16.itemsize
+    )
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    return allocation_bytes <= free_bytes * MAX_LINEAR_ALLOCATION_FREE_FRACTION
+
+
+def _linear_node_target(node: Node) -> Callable[..., torch.Tensor] | None:
     if node.op != "call_function" or node.target not in LINEAR_TARGETS:
-        return False
+        return None
     if node.kwargs or len(node.args) not in {2, 3}:
-        return False
+        return None
     input_node, weight_node = node.args[:2]
     bias_node = node.args[2] if len(node.args) == 3 else None
     if not isinstance(input_node, Node) or not isinstance(weight_node, Node):
-        return False
+        return None
     input_tensor = _node_tensor(input_node)
     weight = _node_tensor(weight_node)
     if input_tensor is None or weight is None:
-        return False
+        return None
     if input_tensor.ndim < 2 or weight.ndim != 2:
-        return False
+        return None
     if input_tensor.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
-        return False
+        return None
     if input_tensor.device.type != "cuda" or weight.device != input_tensor.device:
-        return False
+        return None
     if not input_tensor.is_contiguous() or not weight.is_contiguous():
-        return False
+        return None
     inner = input_tensor.shape[-1]
     columns, weight_inner = weight.shape
     if inner != weight_inner:
-        return False
+        return None
     dimensions = (*input_tensor.shape[:-1], inner, columns)
     if not all(isinstance(dimension, int) for dimension in dimensions):
-        return False
+        return None
     has_bias = bias_node is not None
     if isinstance(bias_node, Node):
         bias = _node_tensor(bias_node)
@@ -239,11 +231,24 @@ def _eligible_linear_node(node: Node) -> bool:
             or bias.device != input_tensor.device
             or not bias.is_contiguous()
         ):
-            return False
+            return None
     elif bias_node is not None:
-        return False
+        return None
     rows = input_tensor.numel() // inner
-    return Rank49Plan.has_measured_linear_win((rows, inner, columns), has_bias=has_bias)
+    shape = (rows, inner, columns)
+    if Rank7Plan.has_measured_linear_win(shape, has_bias=has_bias):
+        return (
+            RDNA3_RANK7_LINEAR_OP
+            if _has_linear_memory_budget(Rank7Plan, shape, input_tensor.device)
+            else None
+        )
+    if Rank49Plan.has_measured_linear_win(shape, has_bias=has_bias):
+        return (
+            RDNA3_LINEAR_OP
+            if _has_linear_memory_budget(Rank49Plan, shape, input_tensor.device)
+            else None
+        )
+    return None
 
 
 def rewrite_eligible_linears(
@@ -262,13 +267,14 @@ def rewrite_eligible_linears(
         FakeTensorProp(graph_module).propagate(*example_inputs)
     rewritten = 0
     for node in linear_nodes:
-        if not _eligible_linear_node(node):
+        target = _linear_node_target(node)
+        if target is None:
             continue
         input_node, weight_node = node.args[:2]
         bias_node = node.args[2] if len(node.args) == 3 else None
         with graph_module.graph.inserting_before(node):
             replacement = graph_module.graph.call_function(
-                RDNA3_LINEAR_OP,
+                target,
                 args=(input_node, weight_node, bias_node),
             )
         replacement.meta = node.meta.copy()

@@ -4,16 +4,14 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("triton")
 
 from rdna3_fastmm.runtime import (
+    ElementTransformConfig,
     MatrixShape,
+    Rank7Plan,
     Rank49Plan,
     Rank343Plan,
     WeightTransformConfig,
 )
-from rdna3_fastmm.linear import (
-    _rank7_kernel_config,
-    rdna3_linear,
-    rdna3_rank7_linear,
-)
+from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
 
 
 def has_tested_rdna3_runtime() -> bool:
@@ -76,6 +74,43 @@ def test_rank_49_unmeasured_linear_families_are_ineligible(
 
 
 @pytest.mark.parametrize(
+    ("shape", "has_bias"),
+    (
+        ((3_328, 4_608, 12_288), False),
+        ((9_216, 4_608, 12_288), False),
+        ((2_048, 12_288, 4_608), False),
+        ((9_216, 12_288, 4_608), False),
+        ((3_600, 4_096, 12_288), False),
+        ((4_096, 12_288, 4_096), False),
+        ((4_992, 4_096, 16_384), True),
+        ((8_192, 3_072, 12_288), True),
+        ((16_384, 12_288, 3_072), True),
+    ),
+)
+def test_rank_7_measured_linear_families_are_eligible(
+    shape: tuple[int, int, int], has_bias: bool
+) -> None:
+    assert Rank7Plan.has_measured_linear_win(shape, has_bias=has_bias)
+
+
+@pytest.mark.parametrize(
+    ("shape", "has_bias"),
+    (
+        ((3_072, 4_608, 12_288), False),
+        ((9_217, 4_608, 12_288), False),
+        ((2_047, 12_288, 4_608), False),
+        ((4_992, 16_384, 4_096), True),
+        ((19_968, 4_096, 16_384), True),
+        ((8_192, 3_072, 12_288), False),
+    ),
+)
+def test_rank_7_unmeasured_linear_families_are_ineligible(
+    shape: tuple[int, int, int], has_bias: bool
+) -> None:
+    assert not Rank7Plan.has_measured_linear_win(shape, has_bias=has_bias)
+
+
+@pytest.mark.parametrize(
     ("inner", "columns", "expected"),
     (
         (3072, 12288, WeightTransformConfig(2, 1024, 4)),
@@ -95,27 +130,50 @@ def test_rank_49_selects_measured_weight_transform_config(
 @pytest.mark.parametrize(
     ("inner", "columns", "transform", "weight"),
     (
-        (3_072, 12_288, (256, 2), WeightTransformConfig(8, 256, 4)),
-        (4_096, 16_384, (256, 2), WeightTransformConfig(8, 256, 4)),
-        (4_608, 12_288, (512, 4), WeightTransformConfig(8, 512, 8)),
-        (12_288, 4_608, (1_024, 4), WeightTransformConfig(8, 256, 8)),
+        (
+            3_072,
+            12_288,
+            ElementTransformConfig(256, 2),
+            WeightTransformConfig(8, 256, 4),
+        ),
+        (
+            4_096,
+            16_384,
+            ElementTransformConfig(256, 2),
+            WeightTransformConfig(8, 256, 4),
+        ),
+        (
+            4_608,
+            12_288,
+            ElementTransformConfig(512, 4),
+            WeightTransformConfig(8, 512, 8),
+        ),
+        (
+            12_288,
+            4_608,
+            ElementTransformConfig(1_024, 4),
+            WeightTransformConfig(8, 256, 8),
+        ),
     ),
 )
 def test_rank_7_selects_measured_transform_config(
     inner: int,
     columns: int,
-    transform: tuple[int, int],
+    transform: ElementTransformConfig,
     weight: WeightTransformConfig,
 ) -> None:
-    config = _rank7_kernel_config(inner, columns)
-
-    assert (config.transform_elements, config.transform_warps) == transform
-    assert config.weight == weight
+    assert Rank7Plan.transform_config(inner, columns) == transform
+    assert Rank7Plan.weight_transform_config(inner, columns) == weight
 
 
 def test_rank_49_plan_rejects_cpu_device() -> None:
     with pytest.raises(ValueError, match="ROCm"):
         Rank49Plan(4, 4, 4, torch.device("cpu"))
+
+
+def test_rank_7_plan_rejects_cpu_device() -> None:
+    with pytest.raises(ValueError, match="ROCm"):
+        Rank7Plan(4, 4, 4, torch.device("cpu"))
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
@@ -225,6 +283,31 @@ def test_rank_49_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
     assert torch.isfinite(candidate).all()
     assert candidate_error / reference_norm < 0.005
     assert baseline_error / reference_norm < 0.005
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_7_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
+    torch.manual_seed(23)
+    shape = (257, 263, 269)
+    device = torch.device("cuda")
+    input_tensor = torch.randn(shape[:2], device=device, dtype=torch.bfloat16)
+    weight = torch.randn((shape[2], shape[1]), device=device, dtype=torch.bfloat16)
+    bias = torch.randn(shape[2], device=device, dtype=torch.bfloat16)
+    reference = input_tensor.float() @ weight.float().T + bias.float()
+    plan = Rank7Plan(
+        *shape,
+        device=device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
+    candidate = plan.run_linear(input_tensor, weight, workspace, bias)
+
+    relative_error = torch.linalg.vector_norm(candidate.float() - reference)
+    reference_norm = torch.linalg.vector_norm(reference)
+
+    assert torch.isfinite(candidate).all()
+    assert relative_error / reference_norm < 0.005
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")

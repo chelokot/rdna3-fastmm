@@ -10,6 +10,7 @@ from benchmarks.corpus import DEFAULT_CORPUS_PATH, GemmCase, load_corpus
 
 @dataclass(frozen=True)
 class RunnerConfig:
+    algorithm: str
     output_directory: Path
     warmups: int
     rounds: int
@@ -26,7 +27,7 @@ def benchmark_command(
         sys.executable,
         "benchmarks/benchmark.py",
         "--algorithm",
-        "rank49",
+        config.algorithm,
         "--operator",
         "linear",
         "--linear-implementation",
@@ -61,6 +62,7 @@ def benchmark_command(
 def parse_arguments() -> tuple[Path, tuple[str, ...] | None, RunnerConfig | None]:
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_PATH)
+    parser.add_argument("--algorithm", choices=("rank7", "rank49"), default="rank49")
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--list", action="store_true")
     selection.add_argument("--case", action="append")
@@ -91,6 +93,7 @@ def parse_arguments() -> tuple[Path, tuple[str, ...] | None, RunnerConfig | None
         corpus_path,
         case_ids,
         RunnerConfig(
+            algorithm=arguments.algorithm,
             output_directory=output_directory,
             warmups=arguments.warmups,
             rounds=arguments.rounds,
@@ -118,8 +121,8 @@ def main() -> None:
     selected = tuple(corpus.case(case_id) for case_id in case_ids)
     config.output_directory.mkdir(parents=True, exist_ok=True)
     for index, case in enumerate(selected, start=1):
-        output_path = config.output_directory / f"{case.id}.json"
-        print(f"[{index}/{len(selected)}] {case.id}", flush=True)
+        output_path = config.output_directory / f"{case.id}-{config.algorithm}.json"
+        print(f"[{index}/{len(selected)}] {case.id} ({config.algorithm})", flush=True)
         subprocess.run(
             benchmark_command(case, config, output_path),
             check=True,

@@ -122,6 +122,12 @@ class WeightTransformConfig:
     warps: int
 
 
+@dataclass(frozen=True)
+class ElementTransformConfig:
+    block_elements: int
+    warps: int
+
+
 class _Plan(ABC):
     algorithm: str
     rank: int
@@ -463,37 +469,13 @@ class _Plan(ABC):
         return first_start < second_end and second_start < first_end
 
 
-class Rank49Plan(_Plan):
-    algorithm = "rank49-v1"
-    rank = rank49_4x4x4.RANK
-    scheme_size = rank49_4x4x4.DIMENSIONS[0]
-    precision_pairs = frozenset(
-        {
-            (torch.float16, torch.float16),
-            (torch.bfloat16, torch.bfloat16),
-            (torch.bfloat16, torch.float16),
-        }
-    )
-    dynamic_shapes = frozenset(
-        {
-            (12_288, 12_288, 12_288),
-            (16_384, 16_384, 16_384),
-        }
-    )
-    prepacked_shapes = dynamic_shapes | {(8_192, 8_192, 8_192)}
-    linear_shape_families = (
-        LinearShapeFamily(5_120, 9_216, 4_608, 12_288, False),
-        LinearShapeFamily(5_632, 9_216, 12_288, 4_608, False),
-        LinearShapeFamily(19_968, 19_968, 4_096, 16_384, True),
-        LinearShapeFamily(19_968, 19_968, 16_384, 4_096, True),
-    )
-    default_weight_transform_config = WeightTransformConfig(2, 1_024, 4)
-    weight_transform_configs = {
-        (4_096, 12_288): WeightTransformConfig(8, 512, 8),
-        (12_288, 4_608): WeightTransformConfig(8, 512, 8),
-        (4_096, 16_384): WeightTransformConfig(4, 512, 8),
-        (16_384, 4_096): WeightTransformConfig(4, 512, 8),
-    }
+class _LinearPlan(_Plan):
+    generated: ModuleType
+    linear_shape_families: tuple[LinearShapeFamily, ...]
+    default_transform_config: ElementTransformConfig
+    transform_configs: dict[tuple[int, int], ElementTransformConfig]
+    default_weight_transform_config: WeightTransformConfig
+    weight_transform_configs: dict[tuple[int, int], WeightTransformConfig]
 
     @classmethod
     def has_measured_linear_win(
@@ -512,6 +494,10 @@ class Rank49Plan(_Plan):
         )
 
     @classmethod
+    def transform_config(cls, inner: int, columns: int) -> ElementTransformConfig:
+        return cls.transform_configs.get((inner, columns), cls.default_transform_config)
+
+    @classmethod
     def weight_transform_config(cls, inner: int, columns: int) -> WeightTransformConfig:
         return cls.weight_transform_configs.get(
             (inner, columns), cls.default_weight_transform_config
@@ -519,9 +505,11 @@ class Rank49Plan(_Plan):
 
     def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
         shape = self.shape
-        block_elements = 256
-        grid = (triton.cdiv(shape.block_rows * shape.block_inner, block_elements),)
-        rank49_4x4x4.left_transform_kernel[grid](
+        config = self.transform_config(shape.inner, shape.columns)
+        grid = (
+            triton.cdiv(shape.block_rows * shape.block_inner, config.block_elements),
+        )
+        self.generated.left_transform_kernel[grid](
             source,
             output,
             shape.rows,
@@ -530,16 +518,18 @@ class Rank49Plan(_Plan):
             shape.block_inner,
             shape.block_rows,
             shape.block_inner,
-            block_elements,
-            num_warps=2,
+            config.block_elements,
+            num_warps=config.warps,
             num_stages=1,
         )
 
     def _transform_right(self, source: torch.Tensor, output: torch.Tensor) -> None:
         shape = self.shape
-        block_elements = 256
-        grid = (triton.cdiv(shape.block_inner * shape.block_columns, block_elements),)
-        rank49_4x4x4.right_transform_kernel[grid](
+        config = self.transform_config(shape.inner, shape.columns)
+        grid = (
+            triton.cdiv(shape.block_inner * shape.block_columns, config.block_elements),
+        )
+        self.generated.right_transform_kernel[grid](
             source,
             output,
             shape.inner,
@@ -548,8 +538,8 @@ class Rank49Plan(_Plan):
             shape.block_columns,
             shape.block_inner,
             shape.block_columns,
-            block_elements,
-            num_warps=2,
+            config.block_elements,
+            num_warps=config.warps,
             num_stages=1,
         )
 
@@ -560,7 +550,7 @@ class Rank49Plan(_Plan):
             triton.cdiv(shape.block_inner, config.block_rows),
             triton.cdiv(shape.block_columns, config.block_columns),
         )
-        rank49_4x4x4.right_transform_weight_kernel[grid](
+        self.generated.right_transform_weight_kernel[grid](
             source,
             output,
             shape.columns,
@@ -575,9 +565,11 @@ class Rank49Plan(_Plan):
 
     def _reconstruct(self, products: torch.Tensor, output: torch.Tensor) -> None:
         shape = self.shape
-        block_elements = 256
-        grid = (triton.cdiv(shape.block_rows * shape.block_columns, block_elements),)
-        rank49_4x4x4.output_transform_kernel[grid](
+        config = self.transform_config(shape.inner, shape.columns)
+        grid = (
+            triton.cdiv(shape.block_rows * shape.block_columns, config.block_elements),
+        )
+        self.generated.output_transform_kernel[grid](
             products,
             output,
             shape.block_rows,
@@ -586,8 +578,8 @@ class Rank49Plan(_Plan):
             shape.columns,
             shape.block_rows,
             shape.block_columns,
-            block_elements,
-            num_warps=2,
+            config.block_elements,
+            num_warps=config.warps,
             num_stages=1,
         )
 
@@ -595,9 +587,11 @@ class Rank49Plan(_Plan):
         self, products: torch.Tensor, bias: torch.Tensor, output: torch.Tensor
     ) -> None:
         shape = self.shape
-        block_elements = 256
-        grid = (triton.cdiv(shape.block_rows * shape.block_columns, block_elements),)
-        rank49_4x4x4.output_transform_bias_kernel[grid](
+        config = self.transform_config(shape.inner, shape.columns)
+        grid = (
+            triton.cdiv(shape.block_rows * shape.block_columns, config.block_elements),
+        )
+        self.generated.output_transform_bias_kernel[grid](
             products,
             output,
             bias,
@@ -607,8 +601,8 @@ class Rank49Plan(_Plan):
             shape.columns,
             shape.block_rows,
             shape.block_columns,
-            block_elements,
-            num_warps=2,
+            config.block_elements,
+            num_warps=config.warps,
             num_stages=1,
         )
 
@@ -650,6 +644,79 @@ class Rank49Plan(_Plan):
         else:
             self._reconstruct_bias(workspace.products, bias, result)
         return result
+
+
+class Rank7Plan(_LinearPlan):
+    algorithm = "rank7-v1"
+    generated = rank7_2x2x2
+    rank = rank7_2x2x2.RANK
+    scheme_size = rank7_2x2x2.DIMENSIONS[0]
+    precision_pairs = frozenset(
+        {
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.float16),
+        }
+    )
+    dynamic_shapes = frozenset()
+    prepacked_shapes = frozenset()
+    linear_shape_families = (
+        LinearShapeFamily(3_328, 9_216, 4_608, 12_288, False),
+        LinearShapeFamily(2_048, 9_216, 12_288, 4_608, False),
+        LinearShapeFamily(3_600, 4_096, 4_096, 12_288, False),
+        LinearShapeFamily(4_096, 4_096, 12_288, 4_096, False),
+        LinearShapeFamily(4_992, 4_992, 4_096, 16_384, True),
+        LinearShapeFamily(8_192, 8_192, 3_072, 12_288, True),
+        LinearShapeFamily(16_384, 16_384, 3_072, 12_288, True),
+        LinearShapeFamily(16_384, 16_384, 12_288, 3_072, True),
+    )
+    default_transform_config = ElementTransformConfig(256, 2)
+    transform_configs = {
+        (4_608, 12_288): ElementTransformConfig(512, 4),
+        (12_288, 4_608): ElementTransformConfig(1_024, 4),
+    }
+    default_weight_transform_config = WeightTransformConfig(8, 512, 8)
+    weight_transform_configs = {
+        (3_072, 12_288): WeightTransformConfig(8, 256, 4),
+        (4_096, 16_384): WeightTransformConfig(8, 256, 4),
+        (4_608, 12_288): WeightTransformConfig(8, 512, 8),
+        (12_288, 4_608): WeightTransformConfig(8, 256, 8),
+    }
+
+
+class Rank49Plan(_LinearPlan):
+    algorithm = "rank49-v1"
+    generated = rank49_4x4x4
+    rank = rank49_4x4x4.RANK
+    scheme_size = rank49_4x4x4.DIMENSIONS[0]
+    precision_pairs = frozenset(
+        {
+            (torch.float16, torch.float16),
+            (torch.bfloat16, torch.bfloat16),
+            (torch.bfloat16, torch.float16),
+        }
+    )
+    dynamic_shapes = frozenset(
+        {
+            (12_288, 12_288, 12_288),
+            (16_384, 16_384, 16_384),
+        }
+    )
+    prepacked_shapes = dynamic_shapes | {(8_192, 8_192, 8_192)}
+    linear_shape_families = (
+        LinearShapeFamily(5_120, 9_216, 4_608, 12_288, False),
+        LinearShapeFamily(5_632, 9_216, 12_288, 4_608, False),
+        LinearShapeFamily(19_968, 19_968, 4_096, 16_384, True),
+        LinearShapeFamily(19_968, 19_968, 16_384, 4_096, True),
+    )
+    default_transform_config = ElementTransformConfig(256, 2)
+    transform_configs = {}
+    default_weight_transform_config = WeightTransformConfig(2, 1_024, 4)
+    weight_transform_configs = {
+        (4_096, 12_288): WeightTransformConfig(8, 512, 8),
+        (12_288, 4_608): WeightTransformConfig(8, 512, 8),
+        (4_096, 16_384): WeightTransformConfig(4, 512, 8),
+        (16_384, 4_096): WeightTransformConfig(4, 512, 8),
+    }
 
 
 class Rank343Plan(_Plan):
@@ -734,6 +801,7 @@ class Rank343Plan(_Plan):
         )
 
 
+Rank7Workspace = Workspace
 Rank49Workspace = Workspace
 Rank343Workspace = Workspace
 
