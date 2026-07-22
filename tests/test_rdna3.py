@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
-pytest.importorskip("triton")
+triton = pytest.importorskip("triton")
 
 from rdna3_fastmm.runtime import (
     ElementTransformConfig,
@@ -10,6 +12,7 @@ from rdna3_fastmm.runtime import (
     Rank49Plan,
     Rank343Plan,
     WeightTransformConfig,
+    unsupported_runtime_reason,
 )
 from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
 
@@ -22,6 +25,104 @@ def has_tested_rdna3_runtime() -> bool:
         getattr(properties, "gcnArchName", "") == "gfx1100"
         and properties.multi_processor_count == 48
     )
+
+
+def configure_supported_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.version, "hip", "6.4.0")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: SimpleNamespace(
+            gcnArchName="gfx1100",
+            multi_processor_count=48,
+        ),
+    )
+    monkeypatch.setattr(torch, "__version__", "2.9.1+rocm6.4")
+    monkeypatch.setattr(triton, "__version__", "3.5.1")
+
+
+def test_runtime_support_reason_accepts_tested_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_supported_runtime(monkeypatch)
+
+    assert unsupported_runtime_reason() is None
+
+
+def test_runtime_support_reason_requires_rocm_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.version, "hip", None)
+
+    assert unsupported_runtime_reason() == "requires a ROCm PyTorch build"
+
+
+def test_runtime_support_reason_requires_available_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_supported_runtime(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert unsupported_runtime_reason() == "requires an available ROCm GPU"
+
+
+def test_runtime_support_reason_rejects_cpu_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_supported_runtime(monkeypatch)
+
+    assert unsupported_runtime_reason(torch.device("cpu")) == (
+        "requires a ROCm GPU device"
+    )
+
+
+def test_runtime_support_reason_describes_wrong_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configure_supported_runtime(monkeypatch)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: SimpleNamespace(
+            gcnArchName="gfx1101",
+            multi_processor_count=40,
+        ),
+    )
+
+    assert unsupported_runtime_reason() == (
+        "tested only on gfx1100 with 48 compute units; found gfx1101 with 40"
+    )
+
+
+@pytest.mark.parametrize(
+    ("component", "version", "expected"),
+    (
+        (
+            "torch",
+            "2.10.0+rocm6.4",
+            "tested only with PyTorch 2.9.1; found 2.10.0+rocm6.4",
+        ),
+        ("hip", "6.5.0", "tested only with ROCm 6.4; found 6.5.0"),
+        ("triton", "3.6.0", "tested only with Triton 3.5.1; found 3.6.0"),
+    ),
+)
+def test_runtime_support_reason_describes_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+    version: str,
+    expected: str,
+) -> None:
+    configure_supported_runtime(monkeypatch)
+    if component == "torch":
+        monkeypatch.setattr(torch, "__version__", version)
+    elif component == "hip":
+        monkeypatch.setattr(torch.version, "hip", version)
+    else:
+        monkeypatch.setattr(triton, "__version__", version)
+
+    assert unsupported_runtime_reason() == expected
 
 
 def test_rank_49_shape_uses_padded_quarters() -> None:

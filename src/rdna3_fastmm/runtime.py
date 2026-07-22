@@ -806,16 +806,32 @@ Rank49Workspace = Workspace
 Rank343Workspace = Workspace
 
 
-def is_tested_runtime(device: torch.device) -> bool:
+def unsupported_runtime_reason(device: torch.device | None = None) -> str | None:
     hip_version = torch.version.hip
-    if hip_version is None or not torch.cuda.is_available():
-        return False
-    properties = torch.cuda.get_device_properties(device)
-    architecture = getattr(properties, "gcnArchName", "")
-    return (
-        architecture == "gfx1100"
-        and properties.multi_processor_count == 48
-        and torch.__version__.startswith("2.9.1+")
-        and hip_version.startswith("6.4")
-        and triton.__version__ == "3.5.1"
+    if hip_version is None:
+        return "requires a ROCm PyTorch build"
+    if not torch.cuda.is_available():
+        return "requires an available ROCm GPU"
+    resolved_device = (
+        torch.device("cuda", torch.cuda.current_device()) if device is None else device
     )
+    if resolved_device.type != "cuda":
+        return "requires a ROCm GPU device"
+    properties = torch.cuda.get_device_properties(resolved_device)
+    architecture = getattr(properties, "gcnArchName", "")
+    if architecture != "gfx1100" or properties.multi_processor_count != 48:
+        return (
+            "tested only on gfx1100 with 48 compute units; found "
+            f"{architecture or 'unknown'} with {properties.multi_processor_count}"
+        )
+    if not torch.__version__.startswith("2.9.1+"):
+        return f"tested only with PyTorch 2.9.1; found {torch.__version__}"
+    if not hip_version.startswith("6.4"):
+        return f"tested only with ROCm 6.4; found {hip_version}"
+    if triton.__version__ != "3.5.1":
+        return f"tested only with Triton 3.5.1; found {triton.__version__}"
+    return None
+
+
+def is_tested_runtime(device: torch.device) -> bool:
+    return unsupported_runtime_reason(device) is None

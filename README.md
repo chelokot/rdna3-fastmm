@@ -165,6 +165,42 @@ the unsupported Python 3.14 runtime. Both BF16 Triton operators and the FX
 rewrite are GPU-tested here, but the same Python restriction also blocks final
 `torch.compile` execution on this workstation.
 
+## ComfyUI custom node
+
+The repository is directly loadable as a ComfyUI custom node:
+
+```bash
+cd /path/to/ComfyUI/custom_nodes
+git clone https://github.com/chelokot/rdna3-fastmm.git RDNA3-FastMM
+```
+
+Restart ComfyUI and insert **RDNA3 FastMM Compile** after the diffusion-model
+loader and every LoRA or model patch, but before the sampler:
+
+```text
+Load Diffusion Model → Apply LoRA / model patches → RDNA3 FastMM Compile → KSampler
+```
+
+The node clones the input `MODEL` and applies ComfyUI's compile wrapper only to
+its `diffusion_model`. It passes the same FastMM compiler callable used by the
+named `rdna3-fastmm` package backend, forces static shape compilation so the
+measured dispatch policy sees concrete matrix dimensions, and preserves
+ordinary Inductor for unsupported operations. Passing the callable directly
+also makes a raw custom-node clone work without installed Python entry-point
+metadata.
+
+Do not chain it with ComfyUI's generic `TorchCompileModel` node: ComfyUI permits
+only one keyed compile wrapper, so the later node replaces the earlier one.
+Changing model patches or resolution can compile a new graph, and the first run
+is slower. The initial node intentionally performs no weight prepacking, so it
+cannot retain stale packed weights across LoRA or offload changes. Aggressive
+DynamicVRAM and custom-loader workflows still require end-to-end validation.
+
+The node requires ComfyUI 0.19.0 or newer, Python 3.12 or 3.13, and the exact
+tested RX 7900 XTX software stack. Unsupported environments fail before cloning
+the model. See [the ComfyUI integration contract](docs/comfyui.md) for lifecycle
+and validation details.
+
 ## Reproducing the baseline
 
 Install a matching ROCm PyTorch build and Triton first, then install this

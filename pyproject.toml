@@ -10,8 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [{name = "Andrey Vlasenko"}]
+dependencies = []
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: AMD ROCm",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -22,6 +25,7 @@ dev = ["mypy>=1.18", "pytest>=8.4", "ruff>=0.12"]
 
 [project.urls]
 Repository = "https://github.com/chelokot/rdna3-fastmm"
+"Bug Tracker" = "https://github.com/chelokot/rdna3-fastmm/issues"
 
 [project.entry-points."torch_dynamo_backends"]
 rdna3-fastmm = "rdna3_fastmm.inductor:compile_backend"
@@ -44,4 +48,11 @@ target-version = "py312"
 [tool.mypy]
 python_version = "3.12"
 strict = true
+mypy_path = "src"
+explicit_package_bases = true
 exclude = "^(src/rdna3_fastmm/generated/|tests/test_(rdna3|inductor).py$)"
+
+[tool.comfy]
+PublisherId = "chelokot"
+DisplayName = "RDNA3 FastMM"
+requires-comfyui = ">=0.19.0"
