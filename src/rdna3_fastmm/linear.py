@@ -32,6 +32,20 @@ _RANK7_DEFAULT_CONFIG = _LinearKernelConfig(
     weight=WeightTransformConfig(8, 512, 8),
 )
 _RANK7_CONFIGS = {
+    (3_072, 12_288): _LinearKernelConfig(
+        scheme_size=2,
+        rank=7,
+        transform_elements=256,
+        transform_warps=2,
+        weight=WeightTransformConfig(8, 256, 4),
+    ),
+    (4_096, 16_384): _LinearKernelConfig(
+        scheme_size=2,
+        rank=7,
+        transform_elements=256,
+        transform_warps=2,
+        weight=WeightTransformConfig(8, 256, 4),
+    ),
     (4_608, 12_288): _LinearKernelConfig(
         scheme_size=2,
         rank=7,

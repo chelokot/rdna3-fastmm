@@ -9,7 +9,11 @@ from rdna3_fastmm.runtime import (
     Rank343Plan,
     WeightTransformConfig,
 )
-from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
+from rdna3_fastmm.linear import (
+    _rank7_kernel_config,
+    rdna3_linear,
+    rdna3_rank7_linear,
+)
 
 
 def has_tested_rdna3_runtime() -> bool:
@@ -86,6 +90,27 @@ def test_rank_49_selects_measured_weight_transform_config(
     inner: int, columns: int, expected: WeightTransformConfig
 ) -> None:
     assert Rank49Plan.weight_transform_config(inner, columns) == expected
+
+
+@pytest.mark.parametrize(
+    ("inner", "columns", "transform", "weight"),
+    (
+        (3_072, 12_288, (256, 2), WeightTransformConfig(8, 256, 4)),
+        (4_096, 16_384, (256, 2), WeightTransformConfig(8, 256, 4)),
+        (4_608, 12_288, (512, 4), WeightTransformConfig(8, 512, 8)),
+        (12_288, 4_608, (1_024, 4), WeightTransformConfig(8, 256, 8)),
+    ),
+)
+def test_rank_7_selects_measured_transform_config(
+    inner: int,
+    columns: int,
+    transform: tuple[int, int],
+    weight: WeightTransformConfig,
+) -> None:
+    config = _rank7_kernel_config(inner, columns)
+
+    assert (config.transform_elements, config.transform_warps) == transform
+    assert config.weight == weight
 
 
 def test_rank_49_plan_rejects_cpu_device() -> None:
