@@ -9,7 +9,7 @@ from rdna3_fastmm.runtime import (
     Rank343Plan,
     WeightTransformConfig,
 )
-from rdna3_fastmm.linear import rdna3_linear
+from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
 
 
 def has_tested_rdna3_runtime() -> bool:
@@ -211,6 +211,22 @@ def test_triton_linear_op_supports_leading_dimensions() -> None:
     reference = input_tensor.float() @ weight.float().T + bias.float()
 
     candidate = rdna3_linear(input_tensor, weight, bias)
+    relative_error = torch.linalg.vector_norm(candidate.float() - reference)
+    reference_norm = torch.linalg.vector_norm(reference)
+
+    assert candidate.shape == (2, 17, 23)
+    assert relative_error / reference_norm < 0.005
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank7_triton_linear_op_supports_leading_dimensions() -> None:
+    torch.manual_seed(31)
+    input_tensor = torch.randn((2, 17, 19), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((23, 19), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((23,), device="cuda", dtype=torch.bfloat16)
+    reference = input_tensor.float() @ weight.float().T + bias.float()
+
+    candidate = rdna3_rank7_linear(input_tensor, weight, bias)
     relative_error = torch.linalg.vector_norm(candidate.float() - reference)
     reference_norm = torch.linalg.vector_norm(reference)
 

@@ -5,7 +5,7 @@ from types import ModuleType
 import torch
 import triton
 
-from rdna3_fastmm.generated import rank49_4x4x4, rank343_8x8x8
+from rdna3_fastmm.generated import rank7_2x2x2, rank49_4x4x4, rank343_8x8x8
 
 
 def _validate_generated_module(
@@ -22,6 +22,12 @@ def _validate_generated_module(
         raise RuntimeError("generated kernel metadata does not match the backend")
 
 
+_validate_generated_module(
+    rank7_2x2x2,
+    (2, 2, 2),
+    7,
+    "b374fcc797ea014994453b7502625e24f70ca2f1dcf1bdbe74a716342bfefb1e",
+)
 _validate_generated_module(
     rank49_4x4x4,
     (4, 4, 4),

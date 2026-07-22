@@ -1,101 +1,185 @@
+from collections.abc import Callable
+from dataclasses import dataclass
+from types import ModuleType
+
 import torch
 from torch.fx import GraphModule, Node
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.library import triton_op, wrap_triton
 import triton
 
-from rdna3_fastmm.generated import rank49_4x4x4
-from rdna3_fastmm.runtime import Rank49Plan
+from rdna3_fastmm.generated import rank7_2x2x2, rank49_4x4x4
+from rdna3_fastmm.runtime import Rank49Plan, WeightTransformConfig
 
 
 LINEAR_TARGETS = frozenset({torch._C._nn.linear, torch.ops.aten.linear.default})
 
 
-@triton_op("rdna3_fastmm::linear", mutates_args={})
-def rdna3_linear(
-    input_tensor: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    inner = input_tensor.shape[-1]
-    columns = weight.shape[0]
-    flattened_input = input_tensor.reshape(-1, inner)
-    rows = flattened_input.shape[0]
-    block_rows = triton.cdiv(rows, 4)
-    block_inner = triton.cdiv(inner, 4)
-    block_columns = triton.cdiv(columns, 4)
-    left_transformed = torch.empty(
-        (49, block_rows, block_inner),
-        device=input_tensor.device,
-        dtype=torch.float16,
+@dataclass(frozen=True)
+class _LinearKernelConfig:
+    scheme_size: int
+    rank: int
+    transform_elements: int
+    transform_warps: int
+    weight: WeightTransformConfig
+
+
+_RANK7_DEFAULT_CONFIG = _LinearKernelConfig(
+    scheme_size=2,
+    rank=7,
+    transform_elements=256,
+    transform_warps=2,
+    weight=WeightTransformConfig(8, 512, 8),
+)
+_RANK7_CONFIGS = {
+    (4_608, 12_288): _LinearKernelConfig(
+        scheme_size=2,
+        rank=7,
+        transform_elements=512,
+        transform_warps=4,
+        weight=WeightTransformConfig(8, 512, 8),
+    ),
+    (12_288, 4_608): _LinearKernelConfig(
+        scheme_size=2,
+        rank=7,
+        transform_elements=1_024,
+        transform_warps=4,
+        weight=WeightTransformConfig(8, 256, 8),
+    ),
+}
+
+
+def _rank7_kernel_config(inner: int, columns: int) -> _LinearKernelConfig:
+    return _RANK7_CONFIGS.get((inner, columns), _RANK7_DEFAULT_CONFIG)
+
+
+def _rank49_kernel_config(inner: int, columns: int) -> _LinearKernelConfig:
+    return _LinearKernelConfig(
+        scheme_size=4,
+        rank=49,
+        transform_elements=256,
+        transform_warps=2,
+        weight=Rank49Plan.weight_transform_config(inner, columns),
     )
-    right_transformed = torch.empty(
-        (49, block_inner, block_columns),
-        device=input_tensor.device,
-        dtype=torch.float16,
-    )
-    left_block_elements = 256
-    left_grid = (triton.cdiv(block_rows * block_inner, left_block_elements),)
-    wrap_triton(rank49_4x4x4.left_transform_kernel)[left_grid](
-        flattened_input,
-        left_transformed,
-        rows,
-        inner,
-        block_rows,
-        block_inner,
-        block_rows,
-        block_inner,
-        left_block_elements,
-        num_warps=2,
-        num_stages=1,
-    )
-    weight_config = Rank49Plan.weight_transform_config(inner, columns)
-    weight_grid = (
-        triton.cdiv(block_inner, weight_config.block_rows),
-        triton.cdiv(block_columns, weight_config.block_columns),
-    )
-    wrap_triton(rank49_4x4x4.right_transform_weight_kernel)[weight_grid](
-        weight,
-        right_transformed,
-        columns,
-        inner,
-        block_inner,
-        block_columns,
-        weight_config.block_rows,
-        weight_config.block_columns,
-        num_warps=weight_config.warps,
-        num_stages=1,
-    )
-    products = torch.bmm(left_transformed, right_transformed)
-    flattened_output = torch.empty(
-        (rows, columns), device=input_tensor.device, dtype=input_tensor.dtype
-    )
-    output_block_elements = 256
-    output_grid = (triton.cdiv(block_rows * block_columns, output_block_elements),)
-    output_kernel = (
-        rank49_4x4x4.output_transform_kernel
-        if bias is None
-        else rank49_4x4x4.output_transform_bias_kernel
-    )
-    output_arguments = [products, flattened_output]
-    if bias is not None:
-        output_arguments.append(bias)
-    wrap_triton(output_kernel)[output_grid](
-        *output_arguments,
-        block_rows,
-        block_columns,
-        rows,
-        columns,
-        block_rows,
-        block_columns,
-        output_block_elements,
-        num_warps=2,
-        num_stages=1,
-    )
-    return flattened_output.reshape(*input_tensor.shape[:-1], columns)
+
+
+def _create_linear_operator(
+    name: str,
+    generated: ModuleType,
+    resolve_config: Callable[[int, int], _LinearKernelConfig],
+) -> Callable[..., torch.Tensor]:
+    left_transform_kernel = generated.left_transform_kernel
+    right_transform_weight_kernel = generated.right_transform_weight_kernel
+    output_transform_kernel = generated.output_transform_kernel
+    output_transform_bias_kernel = generated.output_transform_bias_kernel
+
+    @triton_op(name, mutates_args={})
+    def operator(
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        inner = input_tensor.shape[-1]
+        columns = weight.shape[0]
+        config = resolve_config(inner, columns)
+        flattened_input = input_tensor.reshape(-1, inner)
+        rows = flattened_input.shape[0]
+        block_rows = triton.cdiv(rows, config.scheme_size)
+        block_inner = triton.cdiv(inner, config.scheme_size)
+        block_columns = triton.cdiv(columns, config.scheme_size)
+        left_transformed = torch.empty(
+            (config.rank, block_rows, block_inner),
+            device=input_tensor.device,
+            dtype=torch.float16,
+        )
+        right_transformed = torch.empty(
+            (config.rank, block_inner, block_columns),
+            device=input_tensor.device,
+            dtype=torch.float16,
+        )
+        transform_grid = (
+            triton.cdiv(block_rows * block_inner, config.transform_elements),
+        )
+        wrap_triton(left_transform_kernel)[transform_grid](
+            flattened_input,
+            left_transformed,
+            rows,
+            inner,
+            block_rows,
+            block_inner,
+            block_rows,
+            block_inner,
+            config.transform_elements,
+            num_warps=config.transform_warps,
+            num_stages=1,
+        )
+        weight_grid = (
+            triton.cdiv(block_inner, config.weight.block_rows),
+            triton.cdiv(block_columns, config.weight.block_columns),
+        )
+        wrap_triton(right_transform_weight_kernel)[weight_grid](
+            weight,
+            right_transformed,
+            columns,
+            inner,
+            block_inner,
+            block_columns,
+            config.weight.block_rows,
+            config.weight.block_columns,
+            num_warps=config.weight.warps,
+            num_stages=1,
+        )
+        products = torch.bmm(left_transformed, right_transformed)
+        flattened_output = torch.empty(
+            (rows, columns), device=input_tensor.device, dtype=input_tensor.dtype
+        )
+        output_grid = (
+            triton.cdiv(block_rows * block_columns, config.transform_elements),
+        )
+        if bias is None:
+            wrap_triton(output_transform_kernel)[output_grid](
+                products,
+                flattened_output,
+                block_rows,
+                block_columns,
+                rows,
+                columns,
+                block_rows,
+                block_columns,
+                config.transform_elements,
+                num_warps=config.transform_warps,
+                num_stages=1,
+            )
+        else:
+            wrap_triton(output_transform_bias_kernel)[output_grid](
+                products,
+                flattened_output,
+                bias,
+                block_rows,
+                block_columns,
+                rows,
+                columns,
+                block_rows,
+                block_columns,
+                config.transform_elements,
+                num_warps=config.transform_warps,
+                num_stages=1,
+            )
+        return flattened_output.reshape(*input_tensor.shape[:-1], columns)
+
+    return operator
+
+
+rdna3_linear = _create_linear_operator(
+    "rdna3_fastmm::linear", rank49_4x4x4, _rank49_kernel_config
+)
+rdna3_rank7_linear = _create_linear_operator(
+    "rdna3_fastmm::linear_rank7", rank7_2x2x2, _rank7_kernel_config
+)
 
 
 RDNA3_LINEAR_OP = torch.ops.rdna3_fastmm.linear.default
+RDNA3_RANK7_LINEAR_OP = torch.ops.rdna3_fastmm.linear_rank7.default
 
 
 def _node_tensor(node: Node) -> torch.Tensor | None:

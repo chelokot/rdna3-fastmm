@@ -92,6 +92,21 @@ def test_pyproject_registers_named_dynamo_backend() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "operator_name",
+    ("rdna3_fastmm::linear", "rdna3_fastmm::linear_rank7"),
+)
+def test_triton_linear_ops_register_generated_kernels(operator_name: str) -> None:
+    kernels = torch._library.triton.get_triton_kernels_for_op(operator_name)
+
+    assert [kernel.fn.__name__ for kernel in kernels] == [
+        "left_transform_kernel",
+        "right_transform_weight_kernel",
+        "output_transform_kernel",
+        "output_transform_bias_kernel",
+    ]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
 def test_rewrite_replaces_eligible_bfloat16_linear() -> None:
     class Linear(torch.nn.Module):

@@ -188,11 +188,11 @@ def test_checked_in_rank_49_research_module_matches_generator() -> None:
     assert ast.parse(generated)
 
 
-def test_checked_in_rank_7_research_module_matches_generator() -> None:
-    certificate = Path("certificates/research/2x2x2_rank7_15add/certificate.json")
+def test_checked_in_rank_7_module_matches_generator() -> None:
+    certificate = Path("certificates/2x2x2_rank7_15add/certificate.json")
     generated = generate_module(certificate)
 
-    assert generated == Path("research/generated/rank7_2x2x2.py").read_text()
+    assert generated == Path("src/rdna3_fastmm/generated/rank7_2x2x2.py").read_text()
     assert ast.parse(generated)
 
 

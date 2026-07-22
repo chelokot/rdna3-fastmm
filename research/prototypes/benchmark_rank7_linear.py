@@ -15,10 +15,11 @@ import torch
 import triton
 
 from benchmarks.benchmark import measure_operations, validate_outputs
+from rdna3_fastmm.linear import rdna3_rank7_linear
 
 
-CERTIFICATE_PATH = Path("certificates/research/2x2x2_rank7_15add/certificate.json")
-GENERATED_PATH = Path("research/generated/rank7_2x2x2.py")
+CERTIFICATE_PATH = Path("certificates/2x2x2_rank7_15add/certificate.json")
+GENERATED_PATH = Path("src/rdna3_fastmm/generated/rank7_2x2x2.py")
 CERTIFICATE_SHA256 = "b374fcc797ea014994453b7502625e24f70ca2f1dcf1bdbe74a716342bfefb1e"
 RANK = 7
 SCHEME_SIZE = 2
@@ -277,7 +278,8 @@ def estimate_memory(
         transformed_elements += weight_elements
     if "prepacked" in modes:
         transformed_elements += weight_elements
-    operation_count = 1 + 2 * len(modes)
+    transformed_elements += left_elements + weight_elements + product_elements
+    operation_count = 2 + 2 * len(modes)
     retained_output_bytes = (
         operation_count * shape.rows * shape.columns * bfloat16_bytes
     )
@@ -455,7 +457,13 @@ def benchmark(
             input_tensor, weight, bias
         )
 
-    operations = {"torch_bfloat16_linear": run_native_bfloat16}
+    def run_public_rank7() -> None:
+        outputs["rank7_triton_op"] = rdna3_rank7_linear(input_tensor, weight, bias)
+
+    operations = {
+        "torch_bfloat16_linear": run_native_bfloat16,
+        "rank7_triton_op": run_public_rank7,
+    }
     if "dynamic" in modes:
         if dynamic_weight is None or dynamic_output is None:
             raise RuntimeError("dynamic buffers were not allocated")
@@ -574,11 +582,15 @@ def benchmark(
                 "native_and_fp16_controls": (
                     "allocate conversion and output tensors during each invocation"
                 ),
+                "rank7_triton_op": (
+                    "allocates transformed, product, and output tensors during each invocation"
+                ),
                 "rank7_candidates": (
                     "reuse preallocated transformed, product, and output buffers"
                 ),
                 "interpretation": (
-                    "plan-level screening only; speedups are not allocation-equivalent"
+                    "rank7_triton_op is allocation-equivalent; plan-level rank7 "
+                    "speedups are not allocation-equivalent"
                 ),
             },
             "fp16_control_dynamic": (

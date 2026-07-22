@@ -1,9 +1,9 @@
-# Research-only 2x2x2 rank-7, 15-addition circuit
+# 2x2x2 rank-7, 15-addition circuit
 
 This certificate computes a `2x2` matrix times a `2x2` matrix using seven
-scalar multiplications and 15 additions or subtractions. It is vendored only
-to reproduce the mixed-precision Linear benchmark and is not part of runtime
-dispatch.
+scalar multiplications and 15 additions or subtractions. It backs the
+mixed-precision rank-7 Linear operator; runtime dispatch remains restricted to
+separately measured shape families.
 
 The reduced circuit is copied without modification from
 [FastMatrixMultiplication](https://github.com/dronperminov/FastMatrixMultiplication)
@@ -16,15 +16,15 @@ Verify it from the project root:
 
 ```bash
 python -m tools.verify_reduced_scheme \
-  certificates/research/2x2x2_rank7_15add/certificate.json
+  certificates/2x2x2_rank7_15add/certificate.json
 ```
 
 Regenerate the research kernel deterministically with:
 
 ```bash
 python -m tools.generate_triton_scheme \
-  certificates/research/2x2x2_rank7_15add/certificate.json \
-  research/generated/rank7_2x2x2.py
+  certificates/2x2x2_rank7_15add/certificate.json \
+  src/rdna3_fastmm/generated/rank7_2x2x2.py
 ```
 
 Run one bounded real-shape comparison with:
