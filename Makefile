@@ -9,7 +9,7 @@ verify: lint typecheck test compile hashes certificates
 
 lint:
 	$(RUFF) check src tools tests benchmarks research/prototypes
-	$(RUFF) format --check src tools tests benchmarks research/prototypes --exclude src/rdna3_fastmm/generated
+	$(RUFF) format --check src tools tests benchmarks research/prototypes --exclude src/rdna3_fastmm/generated --exclude 'research/prototypes/generated_*.py'
 
 typecheck:
 	$(MYPY) src/rdna3_fastmm/certificate.py benchmarks/corpus.py benchmarks/run_corpus.py tools tests

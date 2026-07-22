@@ -39,6 +39,13 @@ speedups. Rank-7 process peak allocation was 0.70–2.34 GiB in these clean runs
 Its sampled relative L2 error was 1.04–1.15 times PyTorch BF16's error, with no
 non-finite values.
 
+The canonical reports used PyTorch's default hipBLAS preference. A later
+process-isolated backend control found that hipBLASLt improves native BF16
+Linear while slowing FastMM's FP16 batched leaves. Comparing the fastest backend
+for each implementation narrows the Ideogram `M=8214` gains to `1.171×` up and
+`1.120×` down. FastMM does not mutate PyTorch's process-global BLAS preference;
+the complete control is recorded as E025 in `research/EXPERIMENTS.md`.
+
 The measured rank-7 gate covers no-bias Ideogram up at `M=3328..9216` and down
 at `M=2048..9216`, HiDream up at `M=3600..4096`, exact HiDream down at
 `M=4096`, exact biased LTX up at `M=4992`, and the clean Qwen points above.

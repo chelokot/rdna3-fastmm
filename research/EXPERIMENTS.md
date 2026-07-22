@@ -373,3 +373,72 @@ belong in `benchmarks/results/`.
   leaf throughput relative to the tuned batched library GEMM.
 - Decision: retain the generator and benchmark as reproducible negative
   evidence, but do not test more shapes or expose the kernel to dispatch.
+
+### E023 — Transposed and aligned rank-7 down-projection leaves: rejected
+
+- The candidate computes each product as `Vᵀ @ Uᵀ`, writes transposed rank
+  planes, and uses a certificate-generated reconstruction kernel to restore the
+  ordinary Linear output. Full odd-shape correctness at `257×263×269` matched
+  the current rank-7 operator exactly in the sampled error metrics.
+- On Ideogram down `8214×12288×4608`, four reconstruction launch geometries
+  left the complete product/reconstruction stage effectively tied. The best
+  transposed median was 8.52 ms versus 8.47 ms for the current orientation
+  (`0.994×`); other configurations ranged from `0.996×` to `1.009×`.
+- The odd leaf row count is 4107. Padding it to aligned sizes did not induce a
+  faster library kernel:
+
+| Padded leaf rows | Current BMM | Padded BMM | Padded transposed BMM |
+|---:|---:|---:|---:|
+| 4112 | 8.19 ms | 8.14 ms | 8.20 ms |
+| 4128 | 8.10 ms | 8.14 ms | 8.18 ms |
+| 4160 | 8.21 ms | 8.17 ms | 8.21 ms |
+
+- Occasional allocating full-path samples favored transposition by up to 3%,
+  but the isolated BMM and stage medians did not reproduce that advantage. A
+  padded production transform would also have to recover its extra rows and
+  padding work.
+- Decision: retain the reproducible orientation benchmark and generated
+  reconstruction artifact, but keep the current product orientation and do not
+  extend the screen to other down projections.
+
+### E024 — Seven ordinary GEMMs instead of one batched GEMM: rejected
+
+- The hypothesis was that seven separate `torch.mm` calls might select faster
+  rocBLAS kernels than the rank-7 strided `torch.bmm`, with launch overhead
+  amortized by the large leaves.
+- On Ideogram up `8214×4608×12288`, the seven GEMMs took 7.86 ms versus
+  7.49 ms for BMM (`0.953×`). Product plus reconstruction took 8.43 ms versus
+  8.04 ms, and the full allocating path was effectively tied at 9.83 ms versus
+  9.78 ms.
+- On Ideogram down `8214×12288×4608`, the seven GEMMs took 9.16 ms versus
+  8.10 ms (`0.884×`). The full path regressed from 10.39 ms to 11.05 ms.
+- Odd-shape outputs matched the current rank-7 sampled correctness exactly.
+- Decision: retain one `torch.bmm`; ordinary GEMM dispatch does not recover
+  enough per-leaf throughput to offset seven launches.
+
+### E025 — BLAS backend and rank-batch partition sweep: rejected for dispatch
+
+- The control compared native BF16 Linear and the FP16 rank-7 product stage in
+  separate processes under PyTorch's `hipblas` and `hipblaslt` preferences.
+  CK could not participate on `gfx1100`: PyTorch reported that CK GEMM support
+  was built, but the architecture was unsupported.
+- Splitting the seven leaves never improved the default single BMM. Under
+  hipBLAS, Ideogram up product medians were 7.49 ms for batch 7, 7.52 ms for
+  `4+3`, 7.53 ms for `2+2+2+1`, and 7.81 ms for separate GEMMs. Ideogram down
+  measured 8.16, 8.41, 8.68, and 9.80 ms respectively.
+- hipBLASLt substantially improved native BF16 Linear but regressed the FP16
+  batched leaves. On Ideogram `M=8214`, the fastest process-isolated comparison
+  was therefore FastMM under hipBLAS against native Linear under hipBLASLt:
+
+| Projection | Best native Linear | Best FastMM | Cross-backend speedup |
+|---|---:|---:|---:|
+| Up `4608→12288` | 11.56 ms | 9.87 ms | `1.171×` |
+| Down `12288→4608` | 11.69 ms | 10.44 ms | `1.120×` |
+
+- This is a stricter control than the canonical clean reports, whose PyTorch
+  baseline used the runtime's default hipBLAS preference. Changing the preferred
+  BLAS library inside FastMM is not acceptable because the setting is
+  process-global and would slow unrelated operations.
+- Decision: keep the one-call hipBLAS BMM and do not add product chunking or a
+  backend mutation. Future corpus reports should record the preferred BLAS
+  backend and include a best-native control before broad performance claims.

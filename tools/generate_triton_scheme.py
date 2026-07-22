@@ -938,6 +938,25 @@ def generate_sparse_research_output_fusion_module(source_path: Path) -> str:
     )
 
 
+def generate_research_transposed_output_module(source_path: Path) -> str:
+    source = load_reduced_scheme(source_path)
+    summary = verify_reduced_scheme(source)
+    first_size, _, second_size = summary.dimensions
+    kernel = generate_transposed_output_kernel(
+        "output_transform_transposed_products_kernel",
+        summary.rank,
+        source["w_fresh"],
+        source["w"],
+        first_size,
+    )
+    return (
+        module_header(source_path, summary.dimensions, summary.rank)
+        + "\n\n\n"
+        + kernel
+        + "\n"
+    )
+
+
 def generate_module(
     source_path: Path,
     include_transposed: bool = False,
@@ -1045,18 +1064,28 @@ def main() -> None:
     parser.add_argument("--include-transposed", action="store_true")
     parser.add_argument("--research-output-fusion", action="store_true")
     parser.add_argument("--sparse-research-output-fusion", action="store_true")
+    parser.add_argument("--research-transposed-output", action="store_true")
     parser.add_argument(
         "--output-mode", choices=("scalar", "mfma", "both"), default="scalar"
     )
     arguments = parser.parse_args()
-    if arguments.research_output_fusion or arguments.sparse_research_output_fusion:
+    research_mode_count = sum(
+        (
+            arguments.research_output_fusion,
+            arguments.sparse_research_output_fusion,
+            arguments.research_transposed_output,
+        )
+    )
+    if research_mode_count:
         if arguments.include_transposed or arguments.output_mode != "scalar":
-            parser.error(
-                "research output fusion cannot be combined with production modes"
+            parser.error("research kernels cannot be combined with production modes")
+        if research_mode_count > 1:
+            parser.error("select only one research kernel mode")
+        if arguments.research_transposed_output:
+            generated = generate_research_transposed_output_module(
+                arguments.certificate
             )
-        if arguments.research_output_fusion and arguments.sparse_research_output_fusion:
-            parser.error("select only one research output fusion mode")
-        if arguments.sparse_research_output_fusion:
+        elif arguments.sparse_research_output_fusion:
             generated = generate_sparse_research_output_fusion_module(
                 arguments.certificate
             )

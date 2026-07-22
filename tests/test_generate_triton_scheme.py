@@ -6,6 +6,7 @@ from rdna3_fastmm.certificate import expand_linear_map
 from tools.generate_triton_scheme import (
     generate_module,
     generate_research_output_fusion_module,
+    generate_research_transposed_output_module,
     generate_sparse_research_output_fusion_module,
     schedule_expressions,
 )
@@ -234,6 +235,17 @@ def test_checked_in_rank_7_sparse_fusion_module_matches_generator() -> None:
     assert "tl.atomic_add" not in generated
     assert generated.count("accumulator_0 += product") == 3
     assert generated.count("accumulator_0 -= product") == 1
+
+
+def test_checked_in_rank_7_transposed_module_matches_generator() -> None:
+    certificate = Path("certificates/2x2x2_rank7_15add/certificate.json")
+    generated = generate_research_transposed_output_module(certificate)
+
+    assert (
+        generated
+        == Path("research/prototypes/generated_rank7_transposed_output.py").read_text()
+    )
+    assert ast.parse(generated)
 
 
 def test_transposed_kernels_are_opt_in() -> None:
