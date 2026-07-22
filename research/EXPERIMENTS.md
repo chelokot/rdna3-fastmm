@@ -297,3 +297,47 @@ belong in `benchmarks/results/`.
 - Decision: implement rank-7 as an allocating `torch.library.triton_op`, repeat
   clean alternating benchmarks across dense family boundaries, and change the
   FX recommendation gate only for shapes that retain a repeated measured win.
+
+### E021 — Allocating rank-7 Triton operator: accepted selectively
+
+- Clean commit: `45ad03bc89139cca2905375737f773ddf694d6b5`.
+- Baseline and candidate both use their public allocating APIs. The benchmark
+  alternates execution order, records nine timed samples, validates a tile in
+  every output macroblock against CPU FP32, and includes the replaced output in
+  its peak-memory estimate.
+- PyTorch 2.9.1's `triton_op` source scanner recognizes only direct
+  `wrap_triton(simple_name)` calls. Both rank-7 and rank-49 operators now expose
+  all four possible inner kernels to AOT cache hashing instead of hiding them
+  behind a helper or module-qualified attribute.
+
+| Model path | Shape | Bias | PyTorch | Rank-7 op | Speedup | Error ratio |
+|---|---:|:---:|---:|---:|---:|---:|
+| HiDream up | `3600×4096×12288` | no | 5.14 ms | 4.14 ms | `1.241×` | `1.088×` |
+| HiDream up | `4096×4096×12288` | no | 5.69 ms | 4.41 ms | `1.289×` | `1.053×` |
+| HiDream down | `4096×12288×4096` | no | 7.06 ms | 5.07 ms | `1.391×` | `1.094×` |
+| Ideogram up | `4704×4608×12288` | no | 6.69 ms | 5.75 ms | `1.163×` | `1.066×` |
+| Ideogram down | `4704×12288×4608` | no | 8.65 ms | 6.23 ms | `1.388×` | `1.107×` |
+| Ideogram up | `8214×4608×12288` | no | 12.17 ms | 9.52 ms | `1.278×` | `1.137×` |
+| Ideogram down | `8214×12288×4608` | no | 14.90 ms | 10.37 ms | `1.437×` | `1.055×` |
+| LTX first-stage up | `4992×4096×16384` | yes | 7.77 ms | 6.80 ms | `1.142×` | `1.150×` |
+| Qwen up | `8192×3072×12288` | yes | 7.31 ms | 6.28 ms | `1.163×` | `1.100×` |
+| Qwen up | `16384×3072×12288` | yes | 14.55 ms | 12.41 ms | `1.173×` | `1.044×` |
+| Qwen down | `16384×12288×3072` | yes | 14.58 ms | 13.31 ms | `1.095×` | `1.104×` |
+
+- Dense Ideogram screens retained no-bias up for `M=3328..9216` and down for
+  `M=2048..9216`. The accepted HiDream interval is `M=3600..4096` up plus exact
+  `M=4096` down. LTX and Qwen gates are exact biased shapes from the table.
+- LTX `M=720`, LTX `M=4992` down, and rank-7 LTX `M=19968` were rejected. The
+  last remained slightly slower than the existing rank-49 operator, so the
+  selector retains rank-49 for the exact second-stage LTX pair.
+- Candidate-to-baseline sampled error ratios were `1.044×..1.150×`; no
+  non-finite values were observed. Rank-7 process peak allocation was
+  0.70–2.34 GiB across the accepted clean reports, compared with approximately
+  4.93 GiB for the retained rank-49 LTX up control in the current tree.
+- Automatic selection prefers rank-7 for its measured families, then rank-49
+  for the remaining exact LTX pair, then ordinary Inductor. A conservative
+  runtime guard refuses the rewrite when candidate workspace plus output would
+  consume more than half of currently free device memory.
+- Decision: accept the public `rdna3_fastmm::linear_rank7` operator and only the
+  measured shape families above. Preserve rank-49 and native fallbacks. Raw
+  reports are indexed in [`benchmarks/results/README.md`](../benchmarks/results/README.md).

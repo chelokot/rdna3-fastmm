@@ -22,3 +22,18 @@ hashes, and FP32 correctness samples.
 - [`rx7900xtx-linear-ltx23-19968-up-3993605.json`](rx7900xtx-linear-ltx23-19968-up-3993605.json)
   and [`rx7900xtx-linear-ltx23-19968-down-3993605.json`](rx7900xtx-linear-ltx23-19968-down-3993605.json):
   clean BF16 Triton-op results for the LTX-2.3 upscaled second stage.
+- [`rx7900xtx-rank7-linear-hidream3600-up-45ad03b.json`](rx7900xtx-rank7-linear-hidream3600-up-45ad03b.json),
+  [`rx7900xtx-rank7-linear-hidream4096-up-45ad03b.json`](rx7900xtx-rank7-linear-hidream4096-up-45ad03b.json),
+  and [`rx7900xtx-rank7-linear-hidream4096-down-45ad03b.json`](rx7900xtx-rank7-linear-hidream4096-down-45ad03b.json):
+  clean rank-7 HiDream operator wins.
+- [`rx7900xtx-rank7-linear-ideogram4704-up-45ad03b.json`](rx7900xtx-rank7-linear-ideogram4704-up-45ad03b.json),
+  [`rx7900xtx-rank7-linear-ideogram4704-down-45ad03b.json`](rx7900xtx-rank7-linear-ideogram4704-down-45ad03b.json),
+  [`rx7900xtx-rank7-linear-ideogram8214-up-45ad03b.json`](rx7900xtx-rank7-linear-ideogram8214-up-45ad03b.json),
+  and [`rx7900xtx-rank7-linear-ideogram8214-down-45ad03b.json`](rx7900xtx-rank7-linear-ideogram8214-down-45ad03b.json):
+  clean rank-7 Ideogram operator wins at local and high-resolution row counts.
+- [`rx7900xtx-rank7-linear-ltx4992-up-45ad03b.json`](rx7900xtx-rank7-linear-ltx4992-up-45ad03b.json):
+  clean rank-7 biased LTX first-stage up-projection result.
+- [`rx7900xtx-rank7-linear-qwen8192-up-45ad03b.json`](rx7900xtx-rank7-linear-qwen8192-up-45ad03b.json),
+  [`rx7900xtx-rank7-linear-qwen16384-up-45ad03b.json`](rx7900xtx-rank7-linear-qwen16384-up-45ad03b.json),
+  and [`rx7900xtx-rank7-linear-qwen16384-down-45ad03b.json`](rx7900xtx-rank7-linear-qwen16384-down-45ad03b.json):
+  clean rank-7 biased Qwen operator wins retained by the exact-shape gate.

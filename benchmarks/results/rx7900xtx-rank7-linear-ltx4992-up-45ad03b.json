@@ -1,0 +1,254 @@
+{
+  "schema_version": 2,
+  "generated_at_utc": "2026-07-22T14:29:48.753836+00:00",
+  "provenance": {
+    "git_commit": "45ad03bc89139cca2905375737f773ddf694d6b5",
+    "git_dirty": false,
+    "certificate_path": "certificates/2x2x2_rank7_15add/certificate.json",
+    "certificate_sha256": "b374fcc797ea014994453b7502625e24f70ca2f1dcf1bdbe74a716342bfefb1e",
+    "generated_module_path": "src/rdna3_fastmm/generated/rank7_2x2x2.py",
+    "generated_module_sha256": "d535b7849590723be77f51be71971fbe84d4a201f9c6acca5ec43d0d13d00ed4"
+  },
+  "runtime": {
+    "python": "3.14.4",
+    "torch": "2.9.1+rocm6.4",
+    "hip": "6.4.43484-123eb5128",
+    "triton": "3.5.1",
+    "algorithm": "rank7-v1",
+    "linear_implementation": "triton-op",
+    "input_output_dtype": "bfloat16",
+    "compute_dtype": "float16"
+  },
+  "device": {
+    "name": "AMD Radeon Graphics",
+    "architecture": "gfx1100",
+    "multiprocessor_count": 48,
+    "total_memory_bytes": 25753026560
+  },
+  "environment": {
+    "HIP_VISIBLE_DEVICES": null,
+    "PYTORCH_TUNABLEOP_ENABLED": null,
+    "PYTORCH_TUNABLEOP_FILENAME": null,
+    "TORCH_BLAS_PREFER_HIPBLASLT": null
+  },
+  "protocol": {
+    "seed": 0,
+    "input_distribution": "independent standard normal rounded to bfloat16",
+    "input_output_dtype": "bfloat16",
+    "compute_dtype": "float16",
+    "warmup_rounds": 3,
+    "measured_rounds": 9,
+    "order_schedule": [
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ],
+      [
+        "candidate_dynamic",
+        "torch_linear"
+      ],
+      [
+        "torch_linear",
+        "candidate_dynamic"
+      ]
+    ],
+    "timing_method": "one operation per HIP event pair",
+    "operator": "linear",
+    "weight_layout": "out_in",
+    "bias": true,
+    "correctness_reference": "CPU FP32 tile matmul from original inputs with FP32 bias addition",
+    "tile_policy": "centered 8x8 tile in each of 4 output macroblocks"
+  },
+  "case": {
+    "shape": [
+      4992,
+      4096,
+      16384
+    ],
+    "operator": "linear",
+    "recommended": {
+      "dynamic": true,
+      "external": false,
+      "prepacked": false
+    },
+    "memory": {
+      "estimated_required_bytes": 1258586112,
+      "free_before_bytes": 20394803200,
+      "free_after_bytes": 18735955968,
+      "process_peak_allocated_bytes": 1373929472,
+      "dynamic_workspace_bytes": 592707584,
+      "prepacked_workspace_bytes": 357826560,
+      "packed_right_bytes": 234881024
+    },
+    "algorithms": {
+      "torch_linear": {
+        "api": "torch.nn.functional.linear(input, weight, bias)",
+        "timing": {
+          "raw_ms": [
+            7.768044948577881,
+            7.50396203994751,
+            8.073978424072266,
+            7.994926929473877,
+            7.959897041320801,
+            7.822246074676514,
+            7.751483917236328,
+            7.631392955780029,
+            7.681173801422119
+          ],
+          "median_ms": 7.768044948577881,
+          "first_quartile_ms": 7.681173801422119,
+          "third_quartile_ms": 7.959897041320801
+        },
+        "effective_classical_tflops": 86.25270613279106
+      },
+      "candidate_dynamic": {
+        "api": "rdna3_fastmm::linear_rank7 triton_op",
+        "timing": {
+          "raw_ms": [
+            6.896206855773926,
+            7.5851030349731445,
+            6.80785608291626,
+            6.903565883636475,
+            6.743545055389404,
+            6.770474910736084,
+            6.695254802703857,
+            6.642764091491699,
+            6.8004560470581055
+          ],
+          "median_ms": 6.8004560470581055,
+          "first_quartile_ms": 6.743545055389404,
+          "third_quartile_ms": 6.896206855773926
+        },
+        "effective_classical_tflops": 98.52499502086336,
+        "speedup": 1.1422829432061923,
+        "executed_leaf_tflops": 86.20937064325545
+      }
+    },
+    "packing": null,
+    "correctness": {
+      "aggregate": {
+        "torch_linear": {
+          "sample_count": 256,
+          "relative_l2_error": 0.001642473489841724,
+          "maximum_absolute_error": 0.4698333740234375,
+          "nonfinite_count": 0
+        },
+        "candidate_dynamic": {
+          "sample_count": 256,
+          "relative_l2_error": 0.0018884870236926127,
+          "maximum_absolute_error": 0.4698333740234375,
+          "nonfinite_count": 0
+        }
+      },
+      "candidate_to_baseline_error_ratio": {
+        "candidate_dynamic": 1.1497823467912385
+      },
+      "per_tile": [
+        {
+          "macroblock": [
+            0,
+            0
+          ],
+          "row_start": 1244,
+          "column_start": 4092,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0019007991917491507,
+              "maximum_absolute_error": 0.4698333740234375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.002218612312520627,
+              "maximum_absolute_error": 0.4698333740234375,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            0,
+            1
+          ],
+          "row_start": 1244,
+          "column_start": 12284,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015841258734298662,
+              "maximum_absolute_error": 0.284027099609375,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.001652463313815036,
+              "maximum_absolute_error": 0.284027099609375,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            0
+          ],
+          "row_start": 3740,
+          "column_start": 4092,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0014376139397618884,
+              "maximum_absolute_error": 0.238800048828125,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0016093763945197394,
+              "maximum_absolute_error": 0.261199951171875,
+              "nonfinite_count": 0
+            }
+          }
+        },
+        {
+          "macroblock": [
+            1,
+            1
+          ],
+          "row_start": 3740,
+          "column_start": 12284,
+          "algorithms": {
+            "torch_linear": {
+              "relative_l2_error": 0.0015360945110820046,
+              "maximum_absolute_error": 0.23033905029296875,
+              "nonfinite_count": 0
+            },
+            "candidate_dynamic": {
+              "relative_l2_error": 0.0018949635303327416,
+              "maximum_absolute_error": 0.31365966796875,
+              "nonfinite_count": 0
+            }
+          }
+        }
+      ]
+    }
+  }
+}
