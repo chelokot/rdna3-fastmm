@@ -341,3 +341,35 @@ belong in `benchmarks/results/`.
 - Decision: accept the public `rdna3_fastmm::linear_rank7` operator and only the
   measured shape families above. Preserve rank-49 and native fallbacks. Raw
   reports are indexed in [`benchmarks/results/README.md`](../benchmarks/results/README.md).
+
+### E022 — Sparse rank-7 product/reconstruction fusion: rejected
+
+- The certificate-derived research kernel hard-codes the 14 nonzero rank-7
+  reconstruction updates. It computes seven FP16 `tl.dot` products serially,
+  retains four output tiles in FP32, fuses optional bias, and stores BF16
+  without materializing the rank-major product tensor.
+- Full odd-shape correctness passed at `257×263×269` with and without bias.
+  Avoiding the intermediate FP16 product rounding slightly improved sampled
+  error versus the current rank-7 operator.
+- At Ideogram `8214×4608×12288`, fusion removed a 336.9 MiB product tensor
+  and reduced candidate workspace from 652.2 MiB to 315.3 MiB.
+
+| Tile `BM×BN×BK` | Warps | Fused stage | Current stage | Stage ratio |
+|---:|---:|---:|---:|---:|
+| `16×64×32` | 4 | 93.18 ms | 8.68 ms | `0.093×` |
+| `32×64×32` | 4 | 42.61 ms | 8.51 ms | `0.200×` |
+| `32×64×64` | 4 | 51.10 ms | 8.38 ms | `0.164×` |
+| `32×128×32` | 8 | 46.80 ms | 8.77 ms | `0.187×` |
+| `64×64×32` | 8 | 30.06 ms | 8.42 ms | `0.280×` |
+| `64×128×32` | 8 | 26.09 ms | 8.50 ms | `0.326×` |
+
+- The best full candidate took 23.93 ms, versus 9.76 ms for the current rank-7
+  operator and 12.27 ms for PyTorch. Its sampled relative L2 was `1.81e-3`,
+  versus `1.95e-3` for current rank-7 and `1.76e-3` for PyTorch.
+- Register spilling was not the primary failure. `64×128×32` used 256 VGPRs
+  and 204 bytes of private storage, but non-spilling `64×64×32` still took
+  30.06 ms with 175 VGPRs, and `16×64×32` used only 104 VGPRs while taking
+  93.18 ms. Serializing seven GEMMs inside one Triton program loses too much
+  leaf throughput relative to the tuned batched library GEMM.
+- Decision: retain the generator and benchmark as reproducible negative
+  evidence, but do not test more shapes or expose the kernel to dispatch.

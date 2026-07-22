@@ -1,19 +1,29 @@
 import argparse
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+from types import ModuleType
 from typing import cast, Literal
 
 import torch
 import triton
 
 from benchmarks.benchmark import measure_operations, TimingSummary, validate_outputs
-from rdna3_fastmm.linear import rdna3_linear
-from rdna3_fastmm.runtime import Rank49Plan
-from research.prototypes import generated_rank49_output_fusion
+from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
+from rdna3_fastmm.runtime import Rank7Plan, Rank49Plan
+from research.prototypes import (
+    generated_rank7_sparse_output_fusion,
+    generated_rank49_output_fusion,
+)
 
 
-FusionStrategy = Literal["serial", "atomic"]
+Algorithm = Literal["rank7", "rank49"]
+FusionStrategy = Literal["serial", "atomic", "sparse"]
+Plan = Rank7Plan | Rank49Plan
+LinearOperator = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor | None], torch.Tensor
+]
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,30 @@ class KernelConfig:
     warps: int
 
 
+@dataclass(frozen=True)
+class AlgorithmSpec:
+    plan_type: type[Rank7Plan] | type[Rank49Plan]
+    current_operator: LinearOperator
+    coefficient_module: ModuleType | None
+    sparse_module: ModuleType | None
+
+
+def resolve_algorithm(algorithm: Algorithm) -> AlgorithmSpec:
+    if algorithm == "rank7":
+        return AlgorithmSpec(
+            Rank7Plan,
+            rdna3_rank7_linear,
+            None,
+            generated_rank7_sparse_output_fusion,
+        )
+    return AlgorithmSpec(
+        Rank49Plan,
+        rdna3_linear,
+        generated_rank49_output_fusion,
+        None,
+    )
+
+
 def parse_shape(value: str) -> tuple[int, int, int]:
     dimensions = tuple(int(part) for part in value.split(","))
     if len(dimensions) != 3 or min(dimensions) < 1:
@@ -32,23 +66,52 @@ def parse_shape(value: str) -> tuple[int, int, int]:
 
 
 def run_output_fusion(
-    plan: Rank49Plan,
+    plan: Plan,
     bias: torch.Tensor | None,
-    coefficients: torch.Tensor,
+    coefficients: torch.Tensor | None,
     config: KernelConfig,
     left_transformed: torch.Tensor,
     right_transformed: torch.Tensor,
     output: torch.Tensor,
     accumulator: torch.Tensor | None,
     strategy: FusionStrategy,
+    coefficient_module: ModuleType | None,
+    sparse_module: ModuleType | None,
 ) -> None:
     shape = plan.shape
+    if strategy == "sparse":
+        if sparse_module is None:
+            raise ValueError("sparse fusion is unavailable for this algorithm")
+        sparse_grid = (
+            triton.cdiv(shape.block_rows, config.block_rows),
+            triton.cdiv(shape.block_columns, config.block_columns),
+        )
+        sparse_module.sparse_fused_product_output_kernel[sparse_grid](
+            left_transformed,
+            right_transformed,
+            output,
+            output if bias is None else bias,
+            shape.block_rows,
+            shape.block_inner,
+            shape.block_columns,
+            shape.rows,
+            shape.columns,
+            config.block_rows,
+            config.block_columns,
+            config.block_inner,
+            bias is not None,
+            num_warps=config.warps,
+            num_stages=1,
+        )
+        return
+    if coefficient_module is None or coefficients is None:
+        raise ValueError("coefficient fusion is unavailable for this algorithm")
     if strategy == "serial":
         serial_grid = (
             triton.cdiv(shape.block_rows, config.block_rows),
             triton.cdiv(shape.block_columns, config.block_columns),
         )
-        generated_rank49_output_fusion.fused_product_output_kernel[serial_grid](
+        coefficient_module.fused_product_output_kernel[serial_grid](
             left_transformed,
             right_transformed,
             coefficients,
@@ -74,7 +137,7 @@ def run_output_fusion(
         triton.cdiv(shape.block_columns, config.block_columns),
         plan.rank,
     )
-    generated_rank49_output_fusion.atomic_product_output_kernel[atomic_grid](
+    coefficient_module.atomic_product_output_kernel[atomic_grid](
         left_transformed,
         right_transformed,
         coefficients,
@@ -93,7 +156,7 @@ def run_output_fusion(
     output_elements = shape.rows * shape.columns
     finalize_block_elements = 256
     finalize_grid = (triton.cdiv(output_elements, finalize_block_elements),)
-    generated_rank49_output_fusion.atomic_output_finalize_kernel[finalize_grid](
+    coefficient_module.atomic_output_finalize_kernel[finalize_grid](
         accumulator,
         output,
         output if bias is None else bias,
@@ -108,15 +171,17 @@ def run_output_fusion(
 
 
 def benchmark_stages(
-    plan: Rank49Plan,
+    plan: Plan,
     input_tensor: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-    coefficients: torch.Tensor,
+    coefficients: torch.Tensor | None,
     config: KernelConfig,
     strategy: FusionStrategy,
     warmups: int,
     rounds: int,
+    coefficient_module: ModuleType | None,
+    sparse_module: ModuleType | None,
 ) -> tuple[dict[str, TimingSummary], list[list[str]], int]:
     rows, _, columns = plan.shape.dimensions
     left_transformed = torch.empty(
@@ -166,6 +231,8 @@ def benchmark_stages(
             fused_output,
             accumulator,
             strategy,
+            coefficient_module,
+            sparse_module,
         )
 
     timings, order = measure_operations(
@@ -185,6 +252,7 @@ def benchmark_stages(
 
 
 def benchmark(
+    algorithm: Algorithm,
     shape: tuple[int, int, int],
     has_bias: bool,
     config: KernelConfig,
@@ -195,7 +263,8 @@ def benchmark(
     max_memory_fraction: float,
 ) -> dict[str, object]:
     device = torch.device("cuda")
-    plan = Rank49Plan(
+    spec = resolve_algorithm(algorithm)
+    plan = spec.plan_type(
         *shape,
         device=device,
         dtype=torch.bfloat16,
@@ -226,10 +295,14 @@ def benchmark(
         if has_bias
         else None
     )
-    coefficients = torch.tensor(
-        generated_rank49_output_fusion.FUSED_OUTPUT_COEFFICIENTS,
-        device=device,
-        dtype=torch.int8,
+    coefficients = (
+        torch.tensor(
+            spec.coefficient_module.FUSED_OUTPUT_COEFFICIENTS,
+            device=device,
+            dtype=torch.int8,
+        )
+        if spec.coefficient_module is not None
+        else None
     )
     stage_timings, stage_order, candidate_workspace_bytes = benchmark_stages(
         plan,
@@ -241,6 +314,8 @@ def benchmark(
         strategy,
         warmups,
         rounds,
+        spec.coefficient_module,
+        spec.sparse_module,
     )
     torch.cuda.empty_cache()
     outputs: dict[str, torch.Tensor] = {}
@@ -249,7 +324,7 @@ def benchmark(
         outputs["torch_linear"] = torch.nn.functional.linear(input_tensor, weight, bias)
 
     def run_current_operator() -> None:
-        outputs["current_operator"] = rdna3_linear(input_tensor, weight, bias)
+        outputs["current_operator"] = spec.current_operator(input_tensor, weight, bias)
 
     def run_candidate_operator() -> None:
         candidate_left = torch.empty(
@@ -282,6 +357,8 @@ def benchmark(
             candidate_output,
             candidate_accumulator,
             strategy,
+            spec.coefficient_module,
+            spec.sparse_module,
         )
         outputs["candidate_operator"] = candidate_output
 
@@ -306,6 +383,7 @@ def benchmark(
     torch.cuda.synchronize()
     free_after, _ = torch.cuda.mem_get_info(device)
     return {
+        "algorithm": algorithm,
         "shape": list(shape),
         "bias": has_bias,
         "strategy": strategy,
@@ -355,9 +433,12 @@ def benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--algorithm", choices=("rank7", "rank49"), default="rank49")
     parser.add_argument("--shape", type=parse_shape, required=True)
     parser.add_argument("--bias", action="store_true")
-    parser.add_argument("--strategy", choices=("serial", "atomic"), default="serial")
+    parser.add_argument(
+        "--strategy", choices=("serial", "atomic", "sparse"), default="serial"
+    )
     parser.add_argument("--block-rows", type=int, default=16)
     parser.add_argument("--block-columns", type=int, default=16)
     parser.add_argument("--block-inner", type=int, default=32)
@@ -374,6 +455,10 @@ def main() -> None:
         parser.error("tile size must be positive")
     if not 0 < arguments.max_memory_fraction <= 1:
         parser.error("max memory fraction must be in the interval (0, 1]")
+    if arguments.algorithm == "rank7" and arguments.strategy != "sparse":
+        parser.error("rank7 currently supports only sparse fusion")
+    if arguments.algorithm == "rank49" and arguments.strategy == "sparse":
+        parser.error("rank49 does not provide sparse fusion")
     config = KernelConfig(
         arguments.block_rows,
         arguments.block_columns,
@@ -391,6 +476,7 @@ def main() -> None:
         parser.error("kernel block sizes must be powers of two and at least 16")
     torch.set_grad_enabled(False)
     report = benchmark(
+        arguments.algorithm,
         arguments.shape,
         arguments.bias,
         config,

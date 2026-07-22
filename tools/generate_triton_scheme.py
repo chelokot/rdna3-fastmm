@@ -708,6 +708,90 @@ def fused_product_output_kernel(
     return kernel
 
 
+def generate_sparse_serial_product_output(
+    rank: int,
+    first_size: int,
+    second_size: int,
+    coefficients: tuple[tuple[int, ...], ...],
+) -> str:
+    output_count = validate_fused_output_count(first_size, second_size)
+    if len(coefficients) != rank or any(
+        len(row) != output_count for row in coefficients
+    ):
+        raise ValueError("fused output coefficient dimensions do not match the scheme")
+    if any(value not in {-1, 0, 1} for row in coefficients for value in row):
+        raise ValueError("sparse serial fusion requires coefficients in {-1, 0, 1}")
+    lines = [
+        "@triton.jit",
+        "def sparse_fused_product_output_kernel(",
+        "    left_transformed,",
+        "    right_transformed,",
+        "    output,",
+        "    bias,",
+        "    block_rows: tl.constexpr,",
+        "    block_inner: tl.constexpr,",
+        "    block_columns: tl.constexpr,",
+        "    output_row_count: tl.constexpr,",
+        "    output_columns: tl.constexpr,",
+        "    block_m: tl.constexpr,",
+        "    block_n: tl.constexpr,",
+        "    block_k: tl.constexpr,",
+        "    has_bias: tl.constexpr,",
+        "):",
+        "    local_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)",
+        "    local_columns = tl.program_id(1) * block_n + tl.arange(0, block_n)",
+        "    left_plane_elements = block_rows * block_inner",
+        "    right_plane_elements = block_inner * block_columns",
+    ]
+    lines.extend(
+        f"    accumulator_{output_index} = tl.zeros((block_m, block_n), tl.float32)"
+        for output_index in range(output_count)
+    )
+    for rank_index, coefficient_row in enumerate(coefficients):
+        lines.extend(
+            indent(transformed_product_source(str(rank_index)), " " * 4).splitlines()
+        )
+        for output_index, coefficient in enumerate(coefficient_row):
+            if coefficient == 1:
+                lines.append(f"    accumulator_{output_index} += product")
+            elif coefficient == -1:
+                lines.append(f"    accumulator_{output_index} -= product")
+    lines.append("    if has_bias:")
+    for block_column in range(second_size):
+        lines.extend(
+            [
+                f"        bias_{block_column} = tl.load(",
+                f"            bias + {block_column} * block_columns + local_columns,",
+                "            mask=(local_columns < block_columns)",
+                f"            & ({block_column} * block_columns + local_columns < output_columns),",
+                "            other=0.0,",
+                "        ).to(tl.float32)",
+            ]
+        )
+    for output_index in range(output_count):
+        block_column = output_index % second_size
+        lines.append(f"        accumulator_{output_index} += bias_{block_column}")
+    for output_index in range(output_count):
+        block_row = output_index // second_size
+        block_column = output_index % second_size
+        lines.extend(
+            [
+                "    tl.store(",
+                "        output",
+                f"        + ({block_row} * block_rows + local_rows[:, None]) * output_columns",
+                f"        + {block_column} * block_columns",
+                "        + local_columns[None, :],",
+                f"        accumulator_{output_index},",
+                "        mask=(local_rows[:, None] < block_rows)",
+                "        & (local_columns[None, :] < block_columns)",
+                f"        & ({block_row} * block_rows + local_rows[:, None] < output_row_count)",
+                f"        & ({block_column} * block_columns + local_columns[None, :] < output_columns),",
+                "    )",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def generate_atomic_product_output(
     rank: int, first_size: int, second_size: int
 ) -> tuple[str, str]:
@@ -829,6 +913,31 @@ def generate_research_output_fusion_module(source_path: Path) -> str:
     )
 
 
+def generate_sparse_research_output_fusion_module(source_path: Path) -> str:
+    source = load_reduced_scheme(source_path)
+    summary = verify_reduced_scheme(source)
+    first_size, _, second_size = summary.dimensions
+    coefficients = rank_major_output_coefficients(
+        summary.rank,
+        first_size,
+        second_size,
+        source["w_fresh"],
+        source["w"],
+    )
+    kernel = generate_sparse_serial_product_output(
+        summary.rank,
+        first_size,
+        second_size,
+        coefficients,
+    )
+    return (
+        module_header(source_path, summary.dimensions, summary.rank)
+        + "\n\n\n"
+        + kernel
+        + "\n"
+    )
+
+
 def generate_module(
     source_path: Path,
     include_transposed: bool = False,
@@ -935,16 +1044,24 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--include-transposed", action="store_true")
     parser.add_argument("--research-output-fusion", action="store_true")
+    parser.add_argument("--sparse-research-output-fusion", action="store_true")
     parser.add_argument(
         "--output-mode", choices=("scalar", "mfma", "both"), default="scalar"
     )
     arguments = parser.parse_args()
-    if arguments.research_output_fusion:
+    if arguments.research_output_fusion or arguments.sparse_research_output_fusion:
         if arguments.include_transposed or arguments.output_mode != "scalar":
             parser.error(
                 "research output fusion cannot be combined with production modes"
             )
-        generated = generate_research_output_fusion_module(arguments.certificate)
+        if arguments.research_output_fusion and arguments.sparse_research_output_fusion:
+            parser.error("select only one research output fusion mode")
+        if arguments.sparse_research_output_fusion:
+            generated = generate_sparse_research_output_fusion_module(
+                arguments.certificate
+            )
+        else:
+            generated = generate_research_output_fusion_module(arguments.certificate)
     else:
         generated = generate_module(
             arguments.certificate, arguments.include_transposed, arguments.output_mode

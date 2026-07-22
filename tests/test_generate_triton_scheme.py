@@ -6,6 +6,7 @@ from rdna3_fastmm.certificate import expand_linear_map
 from tools.generate_triton_scheme import (
     generate_module,
     generate_research_output_fusion_module,
+    generate_sparse_research_output_fusion_module,
     schedule_expressions,
 )
 from tools.verify_reduced_scheme import load_reduced_scheme
@@ -194,6 +195,45 @@ def test_checked_in_rank_7_module_matches_generator() -> None:
 
     assert generated == Path("src/rdna3_fastmm/generated/rank7_2x2x2.py").read_text()
     assert ast.parse(generated)
+
+
+def test_checked_in_rank_7_sparse_fusion_module_matches_generator() -> None:
+    certificate = Path("certificates/2x2x2_rank7_15add/certificate.json")
+    generated = generate_sparse_research_output_fusion_module(certificate)
+    tree = ast.parse(generated)
+    kernel = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "sparse_fused_product_output_kernel"
+    )
+
+    assert (
+        generated
+        == Path(
+            "research/prototypes/generated_rank7_sparse_output_fusion.py"
+        ).read_text()
+    )
+    assert [argument.arg for argument in kernel.args.args] == [
+        "left_transformed",
+        "right_transformed",
+        "output",
+        "bias",
+        "block_rows",
+        "block_inner",
+        "block_columns",
+        "output_row_count",
+        "output_columns",
+        "block_m",
+        "block_n",
+        "block_k",
+        "has_bias",
+    ]
+    assert generated.count("product = tl.dot(") == 7
+    assert "coefficients" not in generated
+    assert "tl.atomic_add" not in generated
+    assert generated.count("accumulator_0 += product") == 3
+    assert generated.count("accumulator_0 -= product") == 1
 
 
 def test_transposed_kernels_are_opt_in() -> None:
