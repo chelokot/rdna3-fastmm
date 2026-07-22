@@ -230,3 +230,70 @@ belong in `benchmarks/results/`.
   check would consume approximately 15 GB and was deferred.
 - Decision: accept the public operator, strict FX rewrite, Ideogram intervals,
   and exact LTX shapes. Preserve ordinary Inductor fallback everywhere else.
+
+### E019 — Rank-49 product/reconstruction fusion: rejected
+
+- A generator opt-in emits two research-only alternatives while leaving the
+  production rank-49 module byte-for-byte unchanged:
+  - one program serially computes all 49 leaf products and reconstructs 16
+    output blocks;
+  - 49 independent product programs atomically accumulate directly into an
+    FP32 output buffer, followed by a bias/cast finalizer.
+- At `5120×4608×12288`, the existing `torch.bmm` plus reconstruction stage
+  took approximately 4.71–4.95 ms.
+
+| Alternative | Best measured configuration | Candidate stage | Full Linear | PyTorch Linear |
+|---|---|---:|---:|---:|
+| Serial fusion | `64×128×32`, eight warps | 18.62 ms | 20.45 ms | 7.85 ms |
+| Atomic fusion | `128×128×32`, eight warps | 15.29 ms | 16.39 ms | 8.67 ms |
+
+- The best serial kernel used 256 VGPRs and spilled 776 registers, including
+  1664 bytes of scratch per thread. Smaller non-spilling tiles were much
+  slower because each program still executes all 49 matrix products.
+- Atomic fusion performs 196 coefficient-weighted updates across 16 outputs,
+  or 12.25 FP32 atomics per output element on average. At this shape that is
+  approximately 2.53 billion contended atomic updates.
+- Serial fusion reduced estimated candidate workspace from 876,675,072 bytes
+  to 491,323,392 bytes. Atomic fusion used approximately 742,981,632 bytes.
+  Both retained bounded small-shape error, but the memory saving did not
+  compensate for the latency regression.
+- Decision: keep the generated alternatives as reproducible research
+  artifacts and do not expose either through runtime dispatch.
+
+### E020 — Rank-7 `2×2×2` Linear prototype: accepted for public-op validation
+
+- A verified 15-addition rank-7 certificate reduces the transformed batch from
+  49 quarter-size products to seven half-size products. Relative to ordinary
+  GEMM this executes `7/8 = 87.5%` of the scalar multiplications and expands a
+  transformed weight by `7/4 = 1.75×`, versus `49/16 = 3.0625×` for rank-49.
+- The benchmark uses native contiguous BF16 `weight[N,K]`, FP16 transformed
+  planes and leaf products, BF16 output, optional fused bias, sampled FP32
+  correctness, and explicit ordinary-FP16 controls with matching conversions.
+- Current numbers are plan-level: rank-7 reuses preallocated transformed,
+  product, and output buffers while native and FP16 controls allocate outputs.
+  They therefore justify an allocation-fair public operator benchmark, not
+  dispatch by themselves.
+
+| Model path | Shape | PyTorch BF16 | FP16 control | Rank-7 dynamic | Rank-7 prepacked | Dynamic speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| Ideogram up | `5120×4608×12288` | 7.25 ms | 8.58 ms | 5.87 ms | 5.22 ms | `1.235×` |
+| Ideogram up | `8214×4608×12288` | 12.75 ms | 12.89 ms | 9.59 ms | 8.66 ms | `1.329×` |
+| Ideogram down | `8214×12288×4608` | 15.54 ms | 16.95 ms | 10.08 ms | 9.46 ms | `1.542×` |
+| Ideogram up | `4704×4608×12288` | 7.07 ms | — | 5.79 ms | 4.85 ms | `1.220×` |
+| Ideogram up | `4056×4608×12288` | 6.07 ms | — | 4.92 ms | 4.07 ms | `1.233×` |
+| LTX-2.3 up | `19968×4096×16384` | 33.83 ms | 37.86 ms | 25.70 ms | — | `1.316×` |
+| LTX-2.3 down | `19968×16384×4096` | 35.26 ms | 37.91 ms | 27.57 ms | — | `1.279×` |
+
+- The tuned Ideogram transform configurations were `512` elements/four warps
+  with an `8×512`/eight-warp weight kernel for the up projection, and `1024`
+  elements/four warps with an `8×256`/eight-warp weight kernel for down.
+- Sampled rank-7 relative L2 error was only `1.05–1.09×` the corresponding
+  native BF16 error, materially better than the accepted rank-49 path. No
+  non-finite values were observed.
+- On Ideogram, rank-7 was approximately 6% faster than the clean public
+  rank-49 up result and 12% faster down before allocation-fair validation. On
+  the exact LTX shapes it was effectively tied with rank-49, so rank-49 remains
+  the latency candidate there.
+- Decision: implement rank-7 as an allocating `torch.library.triton_op`, repeat
+  clean alternating benchmarks across dense family boundaries, and change the
+  FX recommendation gate only for shapes that retain a repeated measured win.

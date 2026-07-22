@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 from pathlib import Path
+from textwrap import indent
 from typing import Literal, TypedDict
 
 from rdna3_fastmm.certificate import (
@@ -479,6 +480,33 @@ def generate_transposed_output_kernel(
     return "\n".join(lines)
 
 
+def rank_major_output_coefficients(
+    rank: int,
+    first_size: int,
+    second_size: int,
+    gates: list[list[LinearTerm]],
+    outputs: list[list[LinearTerm]],
+) -> tuple[tuple[int, ...], ...]:
+    output_columns = expand_linear_map(rank, gates, outputs)
+    row_major_outputs = [
+        output_columns[column * first_size + row]
+        for row in range(first_size)
+        for column in range(second_size)
+    ]
+    return tuple(
+        tuple(output[term] for output in row_major_outputs) for term in range(rank)
+    )
+
+
+def format_coefficient_constant(
+    name: str, coefficients: tuple[tuple[int, ...], ...]
+) -> str:
+    coefficient_lines = [f"{name} = ("]
+    coefficient_lines.extend(f"    {row}," for row in coefficients)
+    coefficient_lines.append(")")
+    return "\n".join(coefficient_lines)
+
+
 def generate_mfma_output(
     rank: int,
     first_size: int,
@@ -491,20 +519,9 @@ def generate_mfma_output(
         raise ValueError(
             "MFMA reconstruction requires a power-of-two output count ≤ 64"
         )
-    output_columns = expand_linear_map(rank, gates, outputs)
-    row_major_outputs = [
-        output_columns[column * first_size + row]
-        for row in range(first_size)
-        for column in range(second_size)
-    ]
-    rank_major_coefficients = [
-        tuple(output[term] for output in row_major_outputs) for term in range(rank)
-    ]
-    coefficient_lines = ["MFMA_OUTPUT_COEFFICIENTS = ("]
-    coefficient_lines.extend(
-        f"    {coefficients}," for coefficients in rank_major_coefficients
+    coefficients = rank_major_output_coefficients(
+        rank, first_size, second_size, gates, outputs
     )
-    coefficient_lines.append(")")
     padded_rank = ((rank + 15) // 16) * 16
     kernel = f"""@triton.jit
 def output_transform_mfma_kernel(
@@ -567,7 +584,249 @@ def output_transform_mfma_kernel(
         accumulator,
         mask=output_mask,
     )"""
-    return "\n".join(coefficient_lines), kernel
+    return format_coefficient_constant("MFMA_OUTPUT_COEFFICIENTS", coefficients), kernel
+
+
+def validate_fused_output_count(first_size: int, second_size: int) -> int:
+    output_count = first_size * second_size
+    if output_count & (output_count - 1) or output_count > 16:
+        raise ValueError(
+            "fused product reconstruction requires a power-of-two output count ≤ 16"
+        )
+    return output_count
+
+
+def transformed_product_source(rank_expression: str) -> str:
+    return f"""product = tl.zeros((block_m, block_n), tl.float32)
+for inner_start in tl.range(
+    0, block_inner, block_k, num_stages=1, loop_unroll_factor=1
+):
+    inner_offsets = inner_start + tl.arange(0, block_k)
+    left_values = tl.load(
+        left_transformed
+        + {rank_expression} * left_plane_elements
+        + local_rows[:, None] * block_inner
+        + inner_offsets[None, :],
+        mask=(local_rows[:, None] < block_rows)
+        & (inner_offsets[None, :] < block_inner),
+        other=0.0,
+    ).to(tl.float16)
+    right_values = tl.load(
+        right_transformed
+        + {rank_expression} * right_plane_elements
+        + inner_offsets[:, None] * block_columns
+        + local_columns[None, :],
+        mask=(inner_offsets[:, None] < block_inner)
+        & (local_columns[None, :] < block_columns),
+        other=0.0,
+    ).to(tl.float16)
+    product = tl.dot(
+        left_values,
+        right_values,
+        acc=product,
+        out_dtype=tl.float32,
+    )"""
+
+
+def output_mapping_source(second_size: int) -> str:
+    return f"""output_block_rows = output_blocks // {second_size}
+output_block_columns = output_blocks % {second_size}
+output_rows = (
+    output_block_rows[None, :, None] * block_rows + local_rows[:, None, None]
+)
+output_column_indices = (
+    output_block_columns[None, :, None] * block_columns
+    + local_columns[None, None, :]
+)
+output_mask = (
+    (local_rows[:, None, None] < block_rows)
+    & (local_columns[None, None, :] < block_columns)
+    & (output_rows < output_row_count)
+    & (output_column_indices < output_columns)
+)"""
+
+
+def generate_serial_product_output(
+    rank: int,
+    first_size: int,
+    second_size: int,
+) -> str:
+    output_count = validate_fused_output_count(first_size, second_size)
+    product_source = indent(transformed_product_source("rank_index"), " " * 8)
+    mapping_source = indent(output_mapping_source(second_size), " " * 4)
+    kernel = f"""@triton.jit
+def fused_product_output_kernel(
+    left_transformed,
+    right_transformed,
+    coefficients,
+    output,
+    bias,
+    block_rows: tl.constexpr,
+    block_inner: tl.constexpr,
+    block_columns: tl.constexpr,
+    output_row_count: tl.constexpr,
+    output_columns: tl.constexpr,
+    block_m: tl.constexpr,
+    block_n: tl.constexpr,
+    block_k: tl.constexpr,
+    has_bias: tl.constexpr,
+):
+    local_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)
+    local_columns = tl.program_id(1) * block_n + tl.arange(0, block_n)
+    output_blocks = tl.arange(0, {output_count})
+    left_plane_elements = block_rows * block_inner
+    right_plane_elements = block_inner * block_columns
+    accumulator = tl.zeros((block_m, {output_count}, block_n), tl.float32)
+    for rank_index in tl.range(0, {rank}, loop_unroll_factor=1):
+{product_source}
+        coefficient_values = tl.load(coefficients + rank_index * {output_count} + output_blocks).to(
+            tl.float32
+        )
+        accumulator += product[:, None, :] * coefficient_values[None, :, None]
+{mapping_source}
+    if has_bias:
+        bias_values = tl.load(
+            bias
+            + output_block_columns[:, None] * block_columns
+            + local_columns[None, :],
+            mask=(
+                (local_columns[None, :] < block_columns)
+                & (
+                    output_block_columns[:, None] * block_columns
+                    + local_columns[None, :]
+                    < output_columns
+                )
+            ),
+            other=0.0,
+        ).to(tl.float32)
+        accumulator += bias_values[None, :, :]
+    tl.store(
+        output + output_rows * output_columns + output_column_indices,
+        accumulator,
+        mask=output_mask,
+    )"""
+    return kernel
+
+
+def generate_atomic_product_output(
+    rank: int, first_size: int, second_size: int
+) -> tuple[str, str]:
+    output_count = validate_fused_output_count(first_size, second_size)
+    product_source = indent(transformed_product_source("rank_index"), " " * 4)
+    product_kernel = f"""@triton.jit
+def atomic_product_output_kernel(
+    left_transformed,
+    right_transformed,
+    coefficients,
+    accumulator,
+    block_rows: tl.constexpr,
+    block_inner: tl.constexpr,
+    block_columns: tl.constexpr,
+    output_row_count: tl.constexpr,
+    output_columns: tl.constexpr,
+    block_m: tl.constexpr,
+    block_n: tl.constexpr,
+    block_k: tl.constexpr,
+):
+    local_rows = tl.program_id(0) * block_m + tl.arange(0, block_m)
+    local_columns = tl.program_id(1) * block_n + tl.arange(0, block_n)
+    rank_index = tl.program_id(2)
+    left_plane_elements = block_rows * block_inner
+    right_plane_elements = block_inner * block_columns
+{product_source}
+    for output_block in tl.range(0, {output_count}, loop_unroll_factor=1):
+        coefficient_value = tl.load(coefficients + rank_index * {output_count} + output_block).to(
+            tl.float32
+        )
+        output_block_row = output_block // {second_size}
+        output_block_column = output_block % {second_size}
+        output_rows = output_block_row * block_rows + local_rows[:, None]
+        output_column_indices = (
+            output_block_column * block_columns + local_columns[None, :]
+        )
+        output_mask = (
+            (local_rows[:, None] < block_rows)
+            & (local_columns[None, :] < block_columns)
+            & (output_rows < output_row_count)
+            & (output_column_indices < output_columns)
+            & (coefficient_value != 0.0)
+        )
+        tl.atomic_add(
+            accumulator + output_rows * output_columns + output_column_indices,
+            product * coefficient_value,
+            mask=output_mask,
+            sem="relaxed",
+        )"""
+    finalizer_kernel = """@triton.jit
+def atomic_output_finalize_kernel(
+    accumulator,
+    output,
+    bias,
+    output_elements: tl.constexpr,
+    output_columns: tl.constexpr,
+    block_elements: tl.constexpr,
+    has_bias: tl.constexpr,
+    clear_accumulator: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block_elements + tl.arange(0, block_elements)
+    output_mask = offsets < output_elements
+    values = tl.load(accumulator + offsets, mask=output_mask, other=0.0).to(tl.float32)
+    if has_bias:
+        values += tl.load(
+            bias + offsets % output_columns, mask=output_mask, other=0.0
+        ).to(tl.float32)
+    tl.store(output + offsets, values, mask=output_mask)
+    if clear_accumulator:
+        tl.store(accumulator + offsets, 0.0, mask=output_mask)"""
+    return product_kernel, finalizer_kernel
+
+
+def module_header(
+    source_path: Path, dimensions: tuple[int, int, int], rank: int
+) -> str:
+    certificate_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    return "\n".join(
+        [
+            "import triton",
+            "import triton.language as tl",
+            "",
+            f"DIMENSIONS = {dimensions}",
+            f"RANK = {rank}",
+            f'CERTIFICATE_SHA256 = "{certificate_sha256}"',
+        ]
+    )
+
+
+def generate_research_output_fusion_module(source_path: Path) -> str:
+    source = load_reduced_scheme(source_path)
+    summary = verify_reduced_scheme(source)
+    first_size, _, second_size = summary.dimensions
+    validate_fused_output_count(first_size, second_size)
+    coefficients = rank_major_output_coefficients(
+        summary.rank,
+        first_size,
+        second_size,
+        source["w_fresh"],
+        source["w"],
+    )
+    serial_kernel = generate_serial_product_output(
+        summary.rank, first_size, second_size
+    )
+    atomic_kernel, finalizer_kernel = generate_atomic_product_output(
+        summary.rank, first_size, second_size
+    )
+    header = module_header(source_path, summary.dimensions, summary.rank)
+    coefficient_constant = format_coefficient_constant(
+        "FUSED_OUTPUT_COEFFICIENTS", coefficients
+    )
+    return (
+        header
+        + "\n\n"
+        + coefficient_constant
+        + "\n\n\n"
+        + "\n\n\n".join((serial_kernel, atomic_kernel, finalizer_kernel))
+        + "\n"
+    )
 
 
 def generate_module(
@@ -579,17 +838,7 @@ def generate_module(
     summary = verify_reduced_scheme(source)
     first_size, shared_size, second_size = summary.dimensions
     rank = summary.rank
-    certificate_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    header = "\n".join(
-        [
-            "import triton",
-            "import triton.language as tl",
-            "",
-            f"DIMENSIONS = ({first_size}, {shared_size}, {second_size})",
-            f"RANK = {rank}",
-            f'CERTIFICATE_SHA256 = "{certificate_sha256}"',
-        ]
-    )
+    header = module_header(source_path, summary.dimensions, rank)
     kernels = [
         generate_kernel(
             "left_transform_kernel",
@@ -685,17 +934,22 @@ def main() -> None:
     parser.add_argument("certificate", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--include-transposed", action="store_true")
+    parser.add_argument("--research-output-fusion", action="store_true")
     parser.add_argument(
         "--output-mode", choices=("scalar", "mfma", "both"), default="scalar"
     )
     arguments = parser.parse_args()
-    arguments.output.write_text(
-        generate_module(
-            arguments.certificate,
-            arguments.include_transposed,
-            arguments.output_mode,
+    if arguments.research_output_fusion:
+        if arguments.include_transposed or arguments.output_mode != "scalar":
+            parser.error(
+                "research output fusion cannot be combined with production modes"
+            )
+        generated = generate_research_output_fusion_module(arguments.certificate)
+    else:
+        generated = generate_module(
+            arguments.certificate, arguments.include_transposed, arguments.output_mode
         )
-    )
+    arguments.output.write_text(generated)
 
 
 if __name__ == "__main__":
