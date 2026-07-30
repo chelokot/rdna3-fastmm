@@ -7,6 +7,7 @@ import torch._inductor.config
 from torch.fx import GraphModule
 
 from rdna3_fastmm.external_mm import rdna3_rank49_dynamic_v1_out
+from rdna3_fastmm.linear import rewrite_eligible_linears
 from rdna3_fastmm.runtime import is_tested_runtime
 
 
@@ -31,6 +32,7 @@ def compile_backend(
     inductor_options = torch._inductor.list_mode_options(mode)
     inductor_options.update(options or {})
     if _enable_external_matmul():
+        rewrite_eligible_linears(graph_module, list(example_inputs))
         configured_choices = inductor_options.get(
             "external_matmul", torch._inductor.config.external_matmul
         )

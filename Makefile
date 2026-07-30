@@ -8,21 +8,22 @@ RUFF ?= ruff
 verify: lint typecheck test compile hashes certificates
 
 lint:
-	$(RUFF) check src tools tests benchmarks research/prototypes
-	$(RUFF) format --check src tools tests benchmarks research/prototypes --exclude src/rdna3_fastmm/generated
+	$(RUFF) check __init__.py src tools tests benchmarks research/prototypes
+	$(RUFF) format --check __init__.py src tools tests benchmarks research/prototypes --exclude src/rdna3_fastmm/generated --exclude 'research/prototypes/generated_*.py'
 
 typecheck:
-	$(MYPY) src/rdna3_fastmm/certificate.py tools tests
+	$(MYPY) __init__.py src/rdna3_fastmm/certificate.py benchmarks/corpus.py benchmarks/run_corpus.py tools tests
 
 test:
 	$(PYTEST)
 
 compile:
-	$(PYTHON) -m compileall -q src benchmarks research/prototypes
+	$(PYTHON) -m compileall -q __init__.py src benchmarks research/prototypes
 
 hashes:
 	sha256sum --check certificates/SHA256SUMS
 
 certificates:
+	$(PYTHON) -m tools.verify_reduced_scheme certificates/2x2x2_rank7_15add/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/4x4x4_rank49_159add/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/8x8x8_rank343_1661add/certificate.json
