@@ -18,6 +18,7 @@ import triton
 
 from rdna3_fastmm.runtime import (
     PackedRight,
+    PackedWeight,
     Rank7Plan,
     Rank49Plan,
     Rank343Plan,
@@ -259,9 +260,9 @@ def validate_outputs(
 
 
 def measure_packing(
-    plan: Plan, right: torch.Tensor
-) -> tuple[PackedRight, dict[str, float | int | None]]:
-    warmup = plan.pack_right(right, max_free_memory_fraction=1.0)
+    pack: Callable[[], PackedRight | PackedWeight],
+) -> tuple[PackedRight | PackedWeight, dict[str, float | int | None]]:
+    warmup = pack()
     torch.cuda.synchronize()
     del warmup
     torch.cuda.empty_cache()
@@ -269,7 +270,7 @@ def measure_packing(
     end = torch.cuda.Event(enable_timing=True)
     wall_start = time.perf_counter()
     start.record()
-    packed = plan.pack_right(right, max_free_memory_fraction=1.0)
+    packed = pack()
     end.record()
     end.synchronize()
     wall_end = time.perf_counter()
@@ -278,6 +279,15 @@ def measure_packing(
         "wall_ms": (wall_end - wall_start) * 1000,
         "warmup_calls": 1,
     }
+
+
+def packing_break_even_reuses(
+    packing_ms: float,
+    reference_ms: float,
+    prepacked_ms: float,
+) -> int | None:
+    saved_ms = reference_ms - prepacked_ms
+    return math.ceil(packing_ms / saved_ms) if saved_ms > 0 else None
 
 
 def memory_requirement_bytes(
@@ -328,7 +338,9 @@ def algorithm_metrics(
             "torch_linear": "torch.nn.functional.linear(input, weight, bias)",
             "candidate_dynamic": f"{type(plan).__name__}.run(..., output=...)",
             "candidate_prepacked": (
-                f"{type(plan).__name__}.run_packed(..., output=...)"
+                f"{type(plan).__name__}.run_linear_packed(...)"
+                if operator == "linear"
+                else f"{type(plan).__name__}.run_packed(..., output=...)"
             ),
             "candidate_external": "Inductor external_matmul out-callable",
         }[name]
@@ -386,17 +398,30 @@ def benchmark(
         raise ValueError("operator must be mm or linear")
     if operator == "linear" and algorithm not in LINEAR_OPERATORS:
         raise ValueError("linear benchmarking requires rank7 or rank49")
-    if operator == "linear" and any(mode != "dynamic" for mode in modes):
-        raise ValueError("linear benchmarking currently supports dynamic mode only")
+    if operator == "linear" and any(
+        mode not in {"dynamic", "prepacked"} for mode in modes
+    ):
+        raise ValueError("linear benchmarking supports dynamic and prepacked modes")
     if linear_implementation not in {"plan", "triton-op"}:
         raise ValueError("linear implementation must be plan or triton-op")
+    if (
+        operator == "linear"
+        and "prepacked" in modes
+        and linear_implementation != "plan"
+    ):
+        raise ValueError(
+            "prepacked Linear benchmarking requires the plan implementation"
+        )
     if operator == "linear":
         if not isinstance(plan, (Rank7Plan, Rank49Plan)):
             raise AssertionError("linear plan was not initialized")
         recommendations = {
             "dynamic": plan.is_linear_recommended(has_bias=linear_bias),
             "external": False,
-            "prepacked": False,
+            "prepacked": plan.is_linear_recommended(
+                has_bias=linear_bias,
+                prepacked_weight=True,
+            ),
         }
     else:
         recommendations = {
@@ -510,18 +535,41 @@ def benchmark(
         outputs["candidate_prepacked"] = torch.empty(
             (rows, columns), device=device, dtype=dtype
         )
-        packed_right, packing = measure_packing(plan, right)
+        if operator == "linear":
+            if not isinstance(plan, (Rank7Plan, Rank49Plan)) or weight is None:
+                raise AssertionError("linear plan was not initialized")
+            packed_operand, packing = measure_packing(
+                lambda: plan.pack_weight(weight, max_free_memory_fraction=1.0)
+            )
+        else:
+            packed_operand, packing = measure_packing(
+                lambda: plan.pack_right(right, max_free_memory_fraction=1.0)
+            )
         workspaces["prepacked"] = plan.allocate_workspace(
             max_free_memory_fraction=1.0, prepacked_right=True
         )
 
         def run_prepacked() -> None:
-            plan.run_packed(
-                left,
-                packed_right,
-                workspaces["prepacked"],
-                outputs["candidate_prepacked"],
-            )
+            if operator == "linear":
+                if not isinstance(plan, (Rank7Plan, Rank49Plan)) or not isinstance(
+                    packed_operand, PackedWeight
+                ):
+                    raise AssertionError("packed Linear weight was not initialized")
+                outputs["candidate_prepacked"] = plan.run_linear_packed(
+                    left,
+                    packed_operand,
+                    workspaces["prepacked"],
+                    bias,
+                )
+            else:
+                if not isinstance(packed_operand, PackedRight):
+                    raise AssertionError("packed right matrix was not initialized")
+                plan.run_packed(
+                    left,
+                    packed_operand,
+                    workspaces["prepacked"],
+                    outputs["candidate_prepacked"],
+                )
 
         operations["candidate_prepacked"] = run_prepacked
     timings, order_schedule = measure_operations(operations, warmups, rounds)
@@ -546,17 +594,22 @@ def benchmark(
     if packing is not None:
         dynamic_name = "candidate_dynamic"
         prepacked_name = "candidate_prepacked"
+        prepacked_ms = timings[prepacked_name].median_ms
+        device_ms = cast(float, packing["device_ms"])
         if dynamic_name in timings:
-            saved_ms = (
-                timings[dynamic_name].median_ms - timings[prepacked_name].median_ms
+            dynamic_break_even = packing_break_even_reuses(
+                device_ms,
+                timings[dynamic_name].median_ms,
+                prepacked_ms,
             )
-            device_ms = cast(float, packing["device_ms"])
-            packing["break_even_reuses"] = (
-                math.ceil(device_ms / saved_ms) if saved_ms > 0 else None
-            )
-        packing["first_call_ms"] = (
-            cast(float, packing["device_ms"]) + timings[prepacked_name].median_ms
+            packing["break_even_reuses"] = dynamic_break_even
+            packing["break_even_reuses_vs_dynamic"] = dynamic_break_even
+        packing["break_even_reuses_vs_baseline"] = packing_break_even_reuses(
+            device_ms,
+            timings[baseline_name].median_ms,
+            prepacked_ms,
         )
+        packing["first_call_ms"] = device_ms + prepacked_ms
     properties = torch.cuda.get_device_properties(device)
     free_after, total_memory = torch.cuda.mem_get_info(device)
     return {
@@ -625,6 +678,11 @@ def benchmark(
                 "dynamic_workspace_bytes": plan.workspace_bytes,
                 "prepacked_workspace_bytes": plan.prepacked_workspace_bytes,
                 "packed_right_bytes": plan.packed_right_bytes,
+                "packed_weight_bytes": (
+                    plan.packed_weight_bytes
+                    if isinstance(plan, (Rank7Plan, Rank49Plan))
+                    else None
+                ),
             },
             "algorithms": algorithms,
             "packing": packing,

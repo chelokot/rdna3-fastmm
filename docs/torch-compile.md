@@ -35,6 +35,12 @@ selected first where policies overlap; every other node remains an ordinary
 Inductor operation. The selector also requires the custom operator's complete
 workspace and output allocation to fit within half of currently free VRAM.
 
+The direct plan API separately supports explicit native-weight prepacking. It
+does not install an implicit graph cache: callers own the packed snapshot and
+must recreate it after LoRA, weight mutation, or offload changes. This keeps
+model lifecycle semantics visible while allowing repeated inference calls to
+skip the weight transform and use a smaller workspace.
+
 Each operator preserves row-major weights and has an automatically derived
 fake/meta contract. Its body makes direct `wrap_triton(simple_kernel_name)`
 calls for the left transform, weight transform, and bias/no-bias reconstruction,
@@ -62,7 +68,8 @@ fails in PyTorch's quantization package on Python 3.14.
 - The legacy external call is opaque to fusion and Inductor's memory planner. Its
   temporary workspace is allocated through PyTorch's caching allocator.
 - The public operators still allocate transformed left, transformed weight,
-  products, and output on every call. Their explicit free-memory guard reduces
+  products, and output on every call, although dead transform buffers are
+  released before output allocation. Their explicit free-memory guard reduces
   OOM risk but is not a substitute for Inductor-managed workspace lifetimes.
 - CUDA graphs are disabled while the callable performs Python-side plan and
   workspace construction.

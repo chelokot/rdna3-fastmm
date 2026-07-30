@@ -21,7 +21,7 @@ classifiers = [
 
 [project.optional-dependencies]
 runtime = ["torch>=2.9,<2.10", "triton>=3.5,<3.6"]
-dev = ["mypy>=1.18", "pytest>=8.4", "ruff>=0.12"]
+dev = ["mypy==1.19.1", "pytest==9.0.3", "ruff==0.15.13"]
 
 [project.urls]
 Repository = "https://github.com/chelokot/rdna3-fastmm"

@@ -15,6 +15,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install -e . --no-deps
-      - run: python -m pip install mypy pytest ruff
+      - run: python -m pip install -e ".[dev]"
       - run: make verify

@@ -89,12 +89,22 @@ class Workspace:
 
 
 @dataclass(frozen=True)
-class PackedRight:
+class _PackedTransform:
     algorithm: str
     source_dtype: torch.dtype
     compute_dtype: torch.dtype
     transformed: torch.Tensor
     source_shape: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class PackedRight(_PackedTransform):
+    pass
+
+
+@dataclass(frozen=True)
+class PackedWeight(_PackedTransform):
+    pass
 
 
 @dataclass(frozen=True)
@@ -397,15 +407,30 @@ class _Plan(ABC):
         self._validate_separate_storage(*(tensor for tensor, _ in expected))
 
     def _validate_packed_right(self, packed: PackedRight) -> None:
+        if not isinstance(packed, PackedRight):
+            raise ValueError("packed right matrix does not match the plan")
         shape = self.shape
+        self._validate_packed_transform(
+            packed,
+            (shape.inner, shape.columns),
+            "right matrix",
+        )
+
+    def _validate_packed_transform(
+        self,
+        packed: _PackedTransform,
+        expected_source_shape: tuple[int, int],
+        name: str,
+    ) -> None:
         if (
             packed.algorithm != self.algorithm
             or packed.source_dtype != self.dtype
             or packed.compute_dtype != self.compute_dtype
         ):
-            raise ValueError("packed right matrix does not match the plan")
-        if packed.source_shape != (shape.inner, shape.columns):
-            raise ValueError("packed right matrix shape does not match the plan")
+            raise ValueError(f"packed {name} does not match the plan")
+        if packed.source_shape != expected_source_shape:
+            raise ValueError(f"packed {name} shape does not match the plan")
+        shape = self.shape
         transformed = packed.transformed
         if (
             transformed.shape != (self.rank, shape.block_inner, shape.block_columns)
@@ -414,7 +439,7 @@ class _Plan(ABC):
             or not transformed.is_contiguous()
             or transformed.requires_grad
         ):
-            raise ValueError("packed right matrix does not match the plan")
+            raise ValueError(f"packed {name} does not match the plan")
 
     def _output(self, output: torch.Tensor | None) -> torch.Tensor:
         shape = (self.shape.rows, self.shape.columns)
@@ -472,6 +497,7 @@ class _Plan(ABC):
 class _LinearPlan(_Plan):
     generated: ModuleType
     linear_shape_families: tuple[LinearShapeFamily, ...]
+    prepacked_linear_shape_families: tuple[LinearShapeFamily, ...] = ()
     default_transform_config: ElementTransformConfig
     transform_configs: dict[tuple[int, int], ElementTransformConfig]
     default_weight_transform_config: WeightTransformConfig
@@ -479,17 +505,31 @@ class _LinearPlan(_Plan):
 
     @classmethod
     def has_measured_linear_win(
-        cls, shape: tuple[int, int, int], *, has_bias: bool
+        cls,
+        shape: tuple[int, int, int],
+        *,
+        has_bias: bool,
+        prepacked_weight: bool = False,
     ) -> bool:
-        return any(
-            family.matches(shape, has_bias) for family in cls.linear_shape_families
-        )
+        families = cls.linear_shape_families
+        if prepacked_weight:
+            families += cls.prepacked_linear_shape_families
+        return any(family.matches(shape, has_bias) for family in families)
 
-    def is_linear_recommended(self, *, has_bias: bool) -> bool:
+    def is_linear_recommended(
+        self,
+        *,
+        has_bias: bool,
+        prepacked_weight: bool = False,
+    ) -> bool:
         return (
             self.dtype == torch.bfloat16
             and self.compute_dtype == torch.float16
-            and self.has_measured_linear_win(self.shape.dimensions, has_bias=has_bias)
+            and self.has_measured_linear_win(
+                self.shape.dimensions,
+                has_bias=has_bias,
+                prepacked_weight=prepacked_weight,
+            )
             and is_tested_runtime(self.device)
         )
 
@@ -501,6 +541,46 @@ class _LinearPlan(_Plan):
     def weight_transform_config(cls, inner: int, columns: int) -> WeightTransformConfig:
         return cls.weight_transform_configs.get(
             (inner, columns), cls.default_weight_transform_config
+        )
+
+    @property
+    def packed_weight_bytes(self) -> int:
+        return self.packed_right_bytes
+
+    def pack_weight(
+        self,
+        weight: torch.Tensor,
+        max_free_memory_fraction: float = 0.75,
+    ) -> PackedWeight:
+        self._validate_weight(weight)
+        self._ensure_memory_budget(
+            self.packed_weight_bytes,
+            max_free_memory_fraction,
+            f"{self.algorithm} packed Linear weight",
+        )
+        shape = self.shape
+        transformed = torch.empty(
+            (self.rank, shape.block_inner, shape.block_columns),
+            device=self.device,
+            dtype=self.compute_dtype,
+        )
+        self._transform_weight(weight, transformed)
+        return PackedWeight(
+            algorithm=self.algorithm,
+            source_dtype=self.dtype,
+            compute_dtype=self.compute_dtype,
+            transformed=transformed,
+            source_shape=(shape.columns, shape.inner),
+        )
+
+    def _validate_packed_weight(self, packed: PackedWeight) -> None:
+        if not isinstance(packed, PackedWeight):
+            raise ValueError("packed Linear weight does not match the plan")
+        shape = self.shape
+        self._validate_packed_transform(
+            packed,
+            (shape.columns, shape.inner),
+            "Linear weight",
         )
 
     def _transform_left(self, source: torch.Tensor, output: torch.Tensor) -> None:
@@ -645,6 +725,46 @@ class _LinearPlan(_Plan):
             self._reconstruct_bias(workspace.products, bias, result)
         return result
 
+    def run_linear_packed(
+        self,
+        input_tensor: torch.Tensor,
+        weight: PackedWeight,
+        workspace: Workspace,
+        bias: torch.Tensor | None = None,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        self._validate_left(input_tensor)
+        self._validate_packed_weight(weight)
+        if bias is not None:
+            self._validate_bias(bias)
+        self._validate_workspace(workspace, require_right=False)
+        self._validate_separate_storage(
+            weight.transformed,
+            workspace.left_transformed,
+            workspace.products,
+        )
+        result = self._output(output)
+        self._validate_output_storage(
+            result,
+            input_tensor,
+            weight.transformed,
+            bias,
+            workspace.left_transformed,
+            workspace.products,
+            workspace.right_transformed,
+        )
+        self._transform_left(input_tensor, workspace.left_transformed)
+        torch.bmm(
+            workspace.left_transformed,
+            weight.transformed,
+            out=workspace.products,
+        )
+        if bias is None:
+            self._reconstruct(workspace.products, result)
+        else:
+            self._reconstruct_bias(workspace.products, bias, result)
+        return result
+
 
 class Rank7Plan(_LinearPlan):
     algorithm = "rank7-v1"
@@ -665,9 +785,13 @@ class Rank7Plan(_LinearPlan):
         LinearShapeFamily(3_600, 4_096, 4_096, 12_288, False),
         LinearShapeFamily(4_096, 4_096, 12_288, 4_096, False),
         LinearShapeFamily(4_992, 4_992, 4_096, 16_384, True),
+        LinearShapeFamily(4_992, 4_992, 16_384, 4_096, True),
         LinearShapeFamily(8_192, 8_192, 3_072, 12_288, True),
         LinearShapeFamily(16_384, 16_384, 3_072, 12_288, True),
         LinearShapeFamily(16_384, 16_384, 12_288, 3_072, True),
+    )
+    prepacked_linear_shape_families = (
+        LinearShapeFamily(720, 720, 4_096, 16_384, True),
     )
     default_transform_config = ElementTransformConfig(256, 2)
     transform_configs = {
@@ -677,9 +801,11 @@ class Rank7Plan(_LinearPlan):
     default_weight_transform_config = WeightTransformConfig(8, 512, 8)
     weight_transform_configs = {
         (3_072, 12_288): WeightTransformConfig(8, 256, 4),
+        (4_096, 12_288): WeightTransformConfig(8, 512, 4),
         (4_096, 16_384): WeightTransformConfig(8, 256, 4),
-        (4_608, 12_288): WeightTransformConfig(8, 512, 8),
-        (12_288, 4_608): WeightTransformConfig(8, 256, 8),
+        (4_608, 12_288): WeightTransformConfig(4, 1_024, 4),
+        (12_288, 4_608): WeightTransformConfig(8, 512, 4),
+        (16_384, 4_096): WeightTransformConfig(4, 1_024, 4),
     }
 
 
