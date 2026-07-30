@@ -22,16 +22,18 @@ from rdna3_fastmm.runtime import (
     WeightTransformConfig,
     _LinearPlan,
 )
-from research.prototypes import generated_rank23_3x3x3
+from research.prototypes import (
+    generated_rank23_3x3x3,
+    generated_rank23_55add_3x3x3,
+    generated_rank23_56add_3x3x3,
+)
 
 
-CERTIFICATE_PATH = Path("certificates/research/3x3x3_rank23_58add/certificate.json")
-GENERATED_PATH = Path("research/prototypes/generated_rank23_3x3x3.py")
 LIBRARY_RESERVE_BYTES = 128 * 2**20
 
 
 class Rank23ResearchPlan(_LinearPlan):
-    algorithm = "rank23-research-v1"
+    algorithm = "rank23-58add-research-v1"
     generated = generated_rank23_3x3x3
     rank = generated_rank23_3x3x3.RANK
     scheme_size = generated_rank23_3x3x3.DIMENSIONS[0]
@@ -43,6 +45,38 @@ class Rank23ResearchPlan(_LinearPlan):
     transform_configs: dict[tuple[int, int], ElementTransformConfig] = {}
     default_weight_transform_config = WeightTransformConfig(8, 512, 8)
     weight_transform_configs: dict[tuple[int, int], WeightTransformConfig] = {}
+
+
+class Rank23Addition56ResearchPlan(Rank23ResearchPlan):
+    algorithm = "rank23-56add-research-v1"
+    generated = generated_rank23_56add_3x3x3
+
+
+class Rank23Addition55ResearchPlan(Rank23ResearchPlan):
+    algorithm = "rank23-55add-research-v1"
+    generated = generated_rank23_55add_3x3x3
+
+
+SCHEDULES: dict[
+    str,
+    tuple[type[Rank23ResearchPlan], Path, Path],
+] = {
+    "58add": (
+        Rank23ResearchPlan,
+        Path("certificates/research/3x3x3_rank23_58add/certificate.json"),
+        Path("research/prototypes/generated_rank23_3x3x3.py"),
+    ),
+    "56add": (
+        Rank23Addition56ResearchPlan,
+        Path("certificates/research/3x3x3_rank23_56add/certificate.json"),
+        Path("research/prototypes/generated_rank23_56add_3x3x3.py"),
+    ),
+    "55add": (
+        Rank23Addition55ResearchPlan,
+        Path("certificates/research/3x3x3_rank23_55add/certificate.json"),
+        Path("research/prototypes/generated_rank23_55add_3x3x3.py"),
+    ),
+}
 
 
 def estimated_required_bytes(
@@ -77,6 +111,7 @@ def benchmark(
     max_memory_fraction: float,
     seed: int,
     blas_backend: str,
+    schedule: str,
 ) -> dict[str, object]:
     if torch.version.hip is None or not torch.cuda.is_available():
         raise RuntimeError("the rank-23 research benchmark requires ROCm")
@@ -86,7 +121,8 @@ def benchmark(
     if architecture != "gfx1100":
         raise RuntimeError(f"expected gfx1100, found {architecture or 'unknown'}")
     selected_blas_backend = torch.backends.cuda.preferred_blas_library(blas_backend)
-    plan = Rank23ResearchPlan(
+    plan_type, certificate_path, generated_path = SCHEDULES[schedule]
+    plan = plan_type(
         *shape,
         device=device,
         dtype=torch.bfloat16,
@@ -162,9 +198,9 @@ def benchmark(
         "provenance": {
             "git_commit": git_output("rev-parse", "HEAD"),
             "git_dirty": bool(git_output("status", "--porcelain")),
-            "certificate_path": str(CERTIFICATE_PATH),
-            "certificate_sha256": generated_rank23_3x3x3.CERTIFICATE_SHA256,
-            "generated_path": str(GENERATED_PATH),
+            "certificate_path": str(certificate_path),
+            "certificate_sha256": plan.generated.CERTIFICATE_SHA256,
+            "generated_path": str(generated_path),
         },
         "runtime": {
             "torch": torch.__version__,
@@ -181,6 +217,7 @@ def benchmark(
         "protocol": {
             "shape": list(shape),
             "bias": has_bias,
+            "schedule": schedule,
             "warmup_rounds": warmups,
             "measured_rounds": rounds,
             "order_schedule": order_schedule,
@@ -222,6 +259,7 @@ def main() -> None:
     parser.add_argument("--tile-size", type=int, default=4)
     parser.add_argument("--max-memory-fraction", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=43)
+    parser.add_argument("--schedule", choices=tuple(SCHEDULES), default="58add")
     parser.add_argument(
         "--blas-backend",
         choices=BLAS_BACKENDS,
@@ -245,6 +283,7 @@ def main() -> None:
         arguments.max_memory_fraction,
         arguments.seed,
         arguments.blas_backend,
+        arguments.schedule,
     )
     serialized = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if arguments.output is None:

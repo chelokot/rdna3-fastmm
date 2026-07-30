@@ -480,3 +480,94 @@ belong in `benchmarks/results/`.
 - Decision: use separate hipBLAS and hipBLASLt reports when a best-native
   control matters. Keep runtime dispatch backend-neutral; this switch exists
   only in the benchmark process.
+
+### E028 — Rectangular `3×3×4` rank-29 screen: rejected
+
+- The exact ternary rank-29 certificate has 92 additions `(21, 26, 45)` and
+  executes `29/36 = 80.56%` of classical multiplication. At Ideogram
+  `4704×4608×12288`, it produces 29 FP16 leaves of
+  `1568×1536 @ 1536×3072`.
+- The gate deliberately measured the product stage first, with preallocated
+  buffers, hipBLAS, one warmup, and three rotated rounds. Rank-29 executed
+  429.13 GF in 3.488 ms versus rank-7's 466.12 GF in 3.703 ms (`1.062×`).
+- The follow-up measured transforms only. The best independently selected
+  candidate launches took 0.208 ms for the left transform, 1.531 ms for the
+  native-weight transform, and 0.544 ms for reconstruction: 2.283 ms total
+  versus 1.544 ms for rank-7.
+- Combining the isolated stage medians estimates 5.771 ms for dynamic rank-29
+  versus 5.247 ms for rank-7 (`0.909×`). Excluding both weight transforms
+  estimates only a `1.021×` prepacked advantage, below the 3% continuation
+  threshold. Candidate workspace is 692,748,288 bytes versus 476,356,608
+  bytes (`1.45×`).
+- Decision: retain the exact certificate, deterministic kernel generation, and
+  staged benchmark. Do not run a full allocating screen or add rectangular
+  runtime machinery: preprocessing consumes the product-stage saving.
+
+### E029 — Rank-23 55/56-addition schedules: rejected
+
+- [Sun's 2026 rank-23 circuit](https://arxiv.org/abs/2604.27645) verifies
+  exactly at 56 additions `(13, 13, 30)`. An independently verified
+  55-addition circuit `(13, 14, 28)` realizes the same expanded factor maps as
+  the existing 58-addition certificate; the same 55-addition bound had already
+  appeared in [Sidebottom's July 6 commit](https://github.com/gsidebottom/logic/commit/1ca82c93c55545f7060dc636d6b2ac8adea58e9f).
+- A deterministic converter preserves the 55-addition signed-gate source in
+  the project's reduced-certificate format. Exact integer Brent verification
+  and checked-in generator equality pass for both new schedules.
+- On Ideogram `4704×4608×12288`, fixed-geometry transform-only totals were
+  1.921 ms for 58 additions, 1.824 ms for Sun's 56 additions, and 1.935 ms for
+  55 additions. The 56-addition result cleared the previous 0.066 ms full-path
+  deficit, so it alone received one full confirmation.
+
+| Candidate | Median | Relative to rank-7 | Error ratio vs BF16 |
+|---|---:|---:|---:|
+| Rank-23 56-add optimistic plan | `6.397 ms` | `0.947×` | `1.190×` |
+| Rank-7 public operator | `6.056 ms` | `1.000×` | `1.093×` |
+| Native BF16 Linear | `6.798 ms` | — | `1.000×` |
+
+- The full confirmation retained the E026 contract: BF16 inputs/output, FP16
+  leaves, hipBLAS, no bias, reused candidate workspace against the allocating
+  public rank-7 operator, one warmup, and three rotated rounds. The first
+  candidate/control samples were slow outliers, but their medians still leave
+  rank-23 5.3% behind. Peak allocation was 1,826,922,496 bytes and no sampled
+  output was non-finite.
+- Decision: retain both exact schedules as research artifacts, but do not
+  replace the E026 circuit or extend the GPU screen.
+
+### E030 — Exact `4×6×6` rank-105 screen: rejected
+
+- The exact ternary rank-105 certificate from
+  [Perminov's 2026 scheme family](https://arxiv.org/abs/2606.02480) has 430
+  additions `(112, 131, 187)` and executes `105/144 = 72.92%` of classical
+  multiplication. Its Ideogram leaves are
+  `1176×768 @ 768×2048`.
+- The product-only gate was positive: rank-105 executed 388.43 GF in 3.326 ms
+  versus rank-7's 466.12 GF in 3.853 ms (`1.159×`).
+- Two element and two native-weight launch geometries were then screened,
+  keeping one logical element per lane for the large straight-line programs.
+  The best candidate transforms totaled 3.902 ms versus 1.792 ms for rank-7.
+  Estimated dynamic totals are therefore 7.227 ms versus 5.645 ms (`0.781×`).
+- Even excluding both weight transforms estimates 4.770 ms for rank-105 versus
+  4.728 ms for rank-7. Candidate workspace is 1,025,740,800 bytes, `2.15×`
+  rank-7.
+- Decision: retain the exact certificate, generated transforms, and staged
+  benchmark, but stop before a full allocating screen.
+
+### E031 — Rank-parallel Triton leaf grid: rejected
+
+- [SubCuber, PLDI 2026](https://www.microsoft.com/en-us/research/publication/compiling-strassen-like-matrix-multiplication-algorithms-to-fast-cuda-kernels/)
+  motivates exposing fast-multiplication rank as parallel GPU work. The bounded
+  gate replaced only rank-7's `torch.bmm`: one Triton program computed one rank
+  and `M×N` leaf tile, without yet fusing preprocessing.
+- Four analytically selected RDNA3 configurations covered `64×64`,
+  `64×128`, and `128×64` output tiles plus rank-major/rank-inner scheduling,
+  all with `K=32`. Every kernel emitted
+  `v_wmma_f32_16x16x16_f16`, used 114–118 VGPRs, and had no scratch or VGPR
+  spills.
+- On Ideogram `4704×4608×12288`, the best `64×64×32`, four-warp rank-major
+  kernel took 6.782 ms versus 4.405 ms for the alternating hipBLAS BMM
+  (`0.650×`). Rank-inner scheduling was worse at 7.345 ms. Sampled output
+  relative L2 versus BMM was `3.84e-5`, maximum absolute difference was
+  `0.03125`, and no value was non-finite.
+- Decision: retain the reproducible rank-grid kernel as a sharper negative
+  result than E022. Do not fuse input transforms into it: the unfused product
+  backend already misses the 5% continuation threshold by a wide margin.
