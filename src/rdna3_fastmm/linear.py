@@ -114,6 +114,7 @@ def _create_linear_operator(
             num_stages=1,
         )
         products = torch.bmm(left_transformed, right_transformed)
+        del left_transformed, right_transformed
         flattened_output = torch.empty(
             (rows, columns), device=input_tensor.device, dtype=input_tensor.dtype
         )

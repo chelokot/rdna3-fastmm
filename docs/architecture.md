@@ -28,8 +28,11 @@ planes. `torch.bmm` computes the 49 leaf products, and a generated transform
 reconstructs the 16 output blocks directly into row-major output storage.
 
 Prepacked execution materializes the right transform once. Dynamic execution
-recomputes both transforms for each call. Workspaces and packed operands are
-explicit so allocation is never included in kernel timings.
+recomputes both transforms for each call. Linear plans can likewise snapshot a
+native row-major `weight[N,K]`, reuse it across compatible row counts, and omit
+the transformed-weight buffer from each workspace. Workspaces and packed
+operands remain explicit so benchmarks can report packing, allocation, and
+steady-state execution separately.
 
 ## Dispatch contract
 

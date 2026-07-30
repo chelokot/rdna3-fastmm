@@ -132,6 +132,26 @@ Call `plan.is_linear_recommended(has_bias=False)` before selecting this path.
 The gate includes dtype, runtime, bias semantics, orientation, and the measured
 row interval. Use `Rank49Plan` for the retained exact LTX `M=19968` path.
 
+When a native `weight[N,K]` remains unchanged across calls, transform it once
+and use the smaller prepacked workspace:
+
+```python
+packed_weight = plan.pack_weight(weight)
+workspace = plan.allocate_workspace(prepacked_right=True)
+output = plan.run_linear_packed(
+    input_tensor,
+    packed_weight,
+    workspace,
+)
+```
+
+Check `plan.is_linear_recommended(has_bias=False, prepacked_weight=True)` for
+this path. A `PackedWeight` is an explicit snapshot: repack after LoRA
+application, in-place weight mutation, or device offload/reload. Plans with
+different row counts can share it when the algorithm, `(K,N)`, device, and
+dtypes match. On the measured even-dimensional shapes, Rank-7 packing occupies
+1.75 times the native weight bytes.
+
 ## PyTorch integration
 
 The intended user surface is an opt-in compile backend:
@@ -212,6 +232,17 @@ python benchmarks/benchmark.py \
   --algorithm rank49 \
   --shape 16384,16384,16384 \
   --output benchmarks/results/rank49-16384.json
+
+python benchmarks/benchmark.py \
+  --algorithm rank7 \
+  --operator linear \
+  --linear-implementation plan \
+  --shape 4704,4608,12288 \
+  --dtype bfloat16 \
+  --compute-dtype float16 \
+  --no-bias \
+  --mode both \
+  --output benchmarks/results/rank7-linear-prepacked.json
 ```
 
 List and run bounded real-model cases explicitly:

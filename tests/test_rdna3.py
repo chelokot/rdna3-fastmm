@@ -5,6 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 triton = pytest.importorskip("triton")
 
+from benchmarks.benchmark import packing_break_even_reuses
 from rdna3_fastmm.runtime import (
     ElementTransformConfig,
     MatrixShape,
@@ -41,6 +42,15 @@ def configure_supported_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(torch, "__version__", "2.9.1+rocm6.4")
     monkeypatch.setattr(triton, "__version__", "3.5.1")
+
+
+def test_packing_break_even_reuses_rounds_up() -> None:
+    assert packing_break_even_reuses(1.5, 2.0, 1.5) == 3
+
+
+def test_packing_break_even_reuses_rejects_nonwinning_candidate() -> None:
+    assert packing_break_even_reuses(1.5, 1.5, 1.5) is None
+    assert packing_break_even_reuses(1.5, 1.4, 1.5) is None
 
 
 def test_runtime_support_reason_accepts_tested_stack(
@@ -184,6 +194,7 @@ def test_rank_49_unmeasured_linear_families_are_ineligible(
         ((3_600, 4_096, 12_288), False),
         ((4_096, 12_288, 4_096), False),
         ((4_992, 4_096, 16_384), True),
+        ((4_992, 16_384, 4_096), True),
         ((8_192, 3_072, 12_288), True),
         ((16_384, 12_288, 3_072), True),
     ),
@@ -200,7 +211,6 @@ def test_rank_7_measured_linear_families_are_eligible(
         ((3_072, 4_608, 12_288), False),
         ((9_217, 4_608, 12_288), False),
         ((2_047, 12_288, 4_608), False),
-        ((4_992, 16_384, 4_096), True),
         ((19_968, 4_096, 16_384), True),
         ((8_192, 3_072, 12_288), False),
     ),
@@ -209,6 +219,22 @@ def test_rank_7_unmeasured_linear_families_are_ineligible(
     shape: tuple[int, int, int], has_bias: bool
 ) -> None:
     assert not Rank7Plan.has_measured_linear_win(shape, has_bias=has_bias)
+
+
+def test_rank_7_prepacked_weight_adds_only_measured_shape() -> None:
+    shape = (720, 4_096, 16_384)
+
+    assert not Rank7Plan.has_measured_linear_win(shape, has_bias=True)
+    assert Rank7Plan.has_measured_linear_win(
+        shape,
+        has_bias=True,
+        prepacked_weight=True,
+    )
+    assert not Rank7Plan.has_measured_linear_win(
+        shape,
+        has_bias=False,
+        prepacked_weight=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -239,6 +265,12 @@ def test_rank_49_selects_measured_weight_transform_config(
         ),
         (
             4_096,
+            12_288,
+            ElementTransformConfig(256, 2),
+            WeightTransformConfig(8, 512, 4),
+        ),
+        (
+            4_096,
             16_384,
             ElementTransformConfig(256, 2),
             WeightTransformConfig(8, 256, 4),
@@ -247,13 +279,19 @@ def test_rank_49_selects_measured_weight_transform_config(
             4_608,
             12_288,
             ElementTransformConfig(512, 4),
-            WeightTransformConfig(8, 512, 8),
+            WeightTransformConfig(4, 1_024, 4),
         ),
         (
             12_288,
             4_608,
             ElementTransformConfig(1_024, 4),
-            WeightTransformConfig(8, 256, 8),
+            WeightTransformConfig(8, 512, 4),
+        ),
+        (
+            16_384,
+            4_096,
+            ElementTransformConfig(256, 2),
+            WeightTransformConfig(4, 1_024, 4),
         ),
     ),
 )
@@ -376,6 +414,17 @@ def test_rank_49_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
     )
     workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
     candidate = plan.run_linear(input_tensor, weight, workspace, bias)
+    packed_weight = plan.pack_weight(weight, max_free_memory_fraction=0.1)
+    packed_workspace = plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+        prepacked_right=True,
+    )
+    packed_candidate = plan.run_linear_packed(
+        input_tensor,
+        packed_weight,
+        packed_workspace,
+        bias,
+    )
 
     candidate_error = torch.linalg.vector_norm(candidate.float() - reference)
     reference_norm = torch.linalg.vector_norm(reference)
@@ -384,6 +433,18 @@ def test_rank_49_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
     assert torch.isfinite(candidate).all()
     assert candidate_error / reference_norm < 0.005
     assert baseline_error / reference_norm < 0.005
+    assert torch.equal(candidate, packed_candidate)
+    packed_snapshot = packed_candidate.clone()
+    weight.zero_()
+    assert torch.equal(
+        plan.run_linear_packed(
+            input_tensor,
+            packed_weight,
+            packed_workspace,
+            bias,
+        ),
+        packed_snapshot,
+    )
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
@@ -403,12 +464,91 @@ def test_rank_7_linear_accepts_native_weight_layout_and_fuses_bias() -> None:
     )
     workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
     candidate = plan.run_linear(input_tensor, weight, workspace, bias)
+    packed_weight = plan.pack_weight(weight, max_free_memory_fraction=0.1)
+    packed_workspace = plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+        prepacked_right=True,
+    )
+    packed_candidate = plan.run_linear_packed(
+        input_tensor,
+        packed_weight,
+        packed_workspace,
+        bias,
+    )
 
     relative_error = torch.linalg.vector_norm(candidate.float() - reference)
     reference_norm = torch.linalg.vector_norm(reference)
 
     assert torch.isfinite(candidate).all()
     assert relative_error / reference_norm < 0.005
+    assert torch.equal(candidate, packed_candidate)
+    assert packed_weight.source_shape == (shape[2], shape[1])
+    assert packed_workspace.right_transformed is None
+    assert plan.packed_weight_bytes == plan.packed_right_bytes
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_7_packed_weight_reuses_across_rows_and_rejects_other_shape() -> None:
+    torch.manual_seed(37)
+    device = torch.device("cuda")
+    weight = torch.randn((7, 6), device=device, dtype=torch.bfloat16)
+    source_plan = Rank7Plan(
+        5,
+        6,
+        7,
+        device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    packed_weight = source_plan.pack_weight(
+        weight,
+        max_free_memory_fraction=0.1,
+    )
+    input_tensor = torch.randn((9, 6), device=device, dtype=torch.bfloat16)
+    target_plan = Rank7Plan(
+        9,
+        6,
+        7,
+        device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    dynamic_workspace = target_plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+    )
+    packed_workspace = target_plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+        prepacked_right=True,
+    )
+
+    assert torch.equal(
+        target_plan.run_linear(input_tensor, weight, dynamic_workspace),
+        target_plan.run_linear_packed(
+            input_tensor,
+            packed_weight,
+            packed_workspace,
+        ),
+    )
+
+    incompatible_plan = Rank7Plan(
+        9,
+        8,
+        7,
+        device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    incompatible_input = torch.randn((9, 8), device=device, dtype=torch.bfloat16)
+    incompatible_workspace = incompatible_plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+        prepacked_right=True,
+    )
+    with pytest.raises(ValueError, match="packed Linear weight shape"):
+        incompatible_plan.run_linear_packed(
+            incompatible_input,
+            packed_weight,
+            incompatible_workspace,
+        )
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
