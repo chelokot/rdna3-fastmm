@@ -30,6 +30,7 @@ operator used by the compile integration.
 | Ideogram 4 high-res, MLP up | `8214×4608×12288` | 12.17 ms | 9.52 ms | **1.278×** |
 | Ideogram 4 high-res, MLP down | `8214×12288×4608` | 14.90 ms | 10.37 ms | **1.437×** |
 | LTX-2.3 first stage, MLP up | `4992×4096×16384` | 7.77 ms | 6.80 ms | **1.142×** |
+| LTX-2.3 first stage, MLP down | `4992×16384×4096` | 7.99 ms | 7.30 ms | **1.094×** |
 | Qwen Edit, MLP up | `8192×3072×12288` | 7.31 ms | 6.28 ms | **1.163×** |
 | Qwen Edit, MLP up | `16384×3072×12288` | 14.55 ms | 12.41 ms | **1.173×** |
 | Qwen Edit, MLP down | `16384×12288×3072` | 14.58 ms | 13.31 ms | **1.095×** |
@@ -38,6 +39,10 @@ These are individual operator medians, not end-to-end model or image-generation
 speedups. Rank-7 process peak allocation was 0.70–2.34 GiB in these clean runs.
 Its sampled relative L2 error was 1.04–1.15 times PyTorch BF16's error, with no
 non-finite values.
+
+The LTX down row is a later clean result at commit
+`da038344e95b929bf84e3f175be8bb17cd71b5bc`; it uses the same allocating public
+operator and conservative correctness protocol.
 
 The canonical reports used PyTorch's default hipBLAS preference. A later
 process-isolated backend control found that hipBLASLt improves native BF16
@@ -48,11 +53,31 @@ the complete control is recorded as E025 in `research/EXPERIMENTS.md`.
 
 The measured rank-7 gate covers no-bias Ideogram up at `M=3328..9216` and down
 at `M=2048..9216`, HiDream up at `M=3600..4096`, exact HiDream down at
-`M=4096`, exact biased LTX up at `M=4992`, and the clean Qwen points above.
-Exact biased LTX `M=19968` remains on rank-49, which was still slightly faster
-than rank-7 there. LTX `M=720`, LTX `M=4992` down, and unmeasured shapes remain
+`M=4096`, both exact biased LTX orientations at `M=4992`, and the clean Qwen
+points above. Exact biased LTX `M=19968` remains on rank-49, which was still
+slightly faster than rank-7 there. LTX `M=720` and unmeasured shapes remain
 ordinary PyTorch/Inductor operations. The selector also refuses a rewrite when
 the complete candidate allocation exceeds half of currently free VRAM.
+
+## Reused Linear weights
+
+The direct plan API can transform a stable native weight once. Clean allocating
+results at commit `da038344e95b929bf84e3f175be8bb17cd71b5bc` include output
+allocation in every timed call:
+
+| Workload | PyTorch | Dynamic plan | Prepacked plan | Prepacked speedup |
+|---|---:|---:|---:|---:|
+| Ideogram up `4704×4608×12288` | 6.762 ms | 5.573 ms | 4.808 ms | **1.406×** |
+| Ideogram down `4704×12288×4608` | 8.627 ms | 5.880 ms | 5.310 ms | **1.625×** |
+| HiDream up `4096×4096×12288` | 5.655 ms | 4.184 ms | 3.761 ms | **1.504×** |
+| LTX down `4992×16384×4096` | 8.241 ms | 7.023 ms | 6.425 ms | **1.283×** |
+| LTX low-envelope up `720×4096×16384` | 2.103 ms | — | 1.547 ms | **1.360×** |
+
+Packing amortized against PyTorch on the first use for the four repeated-call
+cases and after three uses at `M=720`. Dynamic and prepacked outputs were
+bitwise identical. Releasing transformed inputs before output allocation also
+reduced the public operator's peak temporary allocation by 115,605,504 bytes
+(`19.49%`) without a measured latency loss.
 
 ## Original square result
 

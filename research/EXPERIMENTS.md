@@ -442,3 +442,60 @@ belong in `benchmarks/results/`.
 - Decision: keep the one-call hipBLAS BMM and do not add product chunking or a
   backend mutation. Future corpus reports should record the preferred BLAS
   backend and include a best-native control before broad performance claims.
+
+### E026 — Reused native Linear weights and exact-shape retuning: accepted
+
+- A `PackedWeight` now snapshots the generated transform of native row-major
+  `weight[N,K]`. Compatible plans can reuse it across row counts while keeping
+  mutation, LoRA, and offload invalidation explicit.
+- This applies the layout-propagation principle described by
+  [LP-GEMM](https://arxiv.org/abs/2604.04599), but none of that paper's CPU
+  performance is transferred to RDNA3. Every number below is a clean local
+  RX 7900 XTX measurement at commit
+  `da038344e95b929bf84e3f175be8bb17cd71b5bc`.
+- Following AMD's
+  [exact-shape optimization workflow](https://rocm.blogs.amd.com/artificial-intelligence/kernel-optimization-agent/README.html),
+  launch candidates were screened per `(K,N)`, checked for bitwise-equivalent
+  output, and then confirmed in alternating full-operator measurements.
+- Four rank-7 native-weight transforms improved:
+  - `(4096,12288)`: `8×512/8` to `8×512/4`;
+  - `(4608,12288)`: `8×512/8` to `4×1024/4`;
+  - `(12288,4608)`: `8×256/8` to `8×512/4`;
+  - `(16384,4096)`: `8×512/8` to `4×1024/4`.
+- The first two changes improved the public allocating operator on every
+  alternating confirmation shape: `1.019–1.020×` for HiDream and
+  `1.028–1.064×` across three Ideogram row counts. The reverse Ideogram and LTX
+  transforms improved by approximately `1.10×` and `1.17×` in isolated repeat
+  screens before full-path confirmation.
+
+| Linear path | PyTorch | Dynamic plan | Prepacked plan | Prepacked speedup |
+|---|---:|---:|---:|---:|
+| Ideogram up `4704×4608×12288` | 6.762 ms | 5.573 ms (`1.213×`) | 4.808 ms | `1.406×` |
+| Ideogram down `4704×12288×4608` | 8.627 ms | 5.880 ms (`1.467×`) | 5.310 ms | `1.625×` |
+| HiDream up `4096×4096×12288` | 5.655 ms | 4.184 ms (`1.352×`) | 3.761 ms | `1.504×` |
+| LTX first-stage down `4992×16384×4096` | 8.241 ms | 7.023 ms (`1.173×`) | 6.425 ms | `1.283×` |
+| LTX low-envelope up `720×4096×16384` | 2.103 ms | — | 1.547 ms | `1.360×` |
+
+- Packing took `1.08–1.72 ms` on the four repeated-call cases and already
+  amortized against PyTorch on the first use. The low-envelope LTX case broke
+  even after three uses.
+- The allocating public Triton operator for the newly admitted LTX down shape
+  measured 7.302 ms against 7.990 ms (`1.094×`), so that exact shape enters the
+  automatic rank-7 gate. The low-envelope LTX shape enters only the explicit
+  prepacked gate.
+- Releasing dead transformed inputs immediately after `torch.bmm` reduced the
+  operator's peak temporary allocation from 593,010,688 to 477,405,184 bytes:
+  115,605,504 bytes (`19.49%`) saved. Eleven alternating rounds measured
+  4.825 ms with early release versus 4.838 ms with retained buffers.
+- Dynamic and prepacked outputs were bitwise identical. Sampled relative L2
+  error stayed at most `1.097×` the matching PyTorch error, with no non-finite
+  values.
+- Decision: accept explicit native-weight prepacking, the four transform
+  configurations, early buffer release, exact LTX down dynamic dispatch, and
+  exact low-envelope LTX prepacked recommendation. Clean reports:
+  - [`rx7900xtx-rank7-linear-ideogram-up-4704-both-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ideogram-up-4704-both-da03834.json);
+  - [`rx7900xtx-rank7-linear-ideogram-down-4704-both-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ideogram-down-4704-both-da03834.json);
+  - [`rx7900xtx-rank7-linear-hidream-up-4096-both-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-hidream-up-4096-both-da03834.json);
+  - [`rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json);
+  - [`rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json);
+  - [`rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json).

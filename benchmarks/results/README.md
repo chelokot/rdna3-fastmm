@@ -37,3 +37,14 @@ hashes, and FP32 correctness samples.
   [`rx7900xtx-rank7-linear-qwen16384-up-45ad03b.json`](rx7900xtx-rank7-linear-qwen16384-up-45ad03b.json),
   and [`rx7900xtx-rank7-linear-qwen16384-down-45ad03b.json`](rx7900xtx-rank7-linear-qwen16384-down-45ad03b.json):
   clean rank-7 biased Qwen operator wins retained by the exact-shape gate.
+- [`rx7900xtx-rank7-linear-ideogram-up-4704-both-da03834.json`](rx7900xtx-rank7-linear-ideogram-up-4704-both-da03834.json),
+  [`rx7900xtx-rank7-linear-ideogram-down-4704-both-da03834.json`](rx7900xtx-rank7-linear-ideogram-down-4704-both-da03834.json),
+  and [`rx7900xtx-rank7-linear-hidream-up-4096-both-da03834.json`](rx7900xtx-rank7-linear-hidream-up-4096-both-da03834.json):
+  clean native-weight dynamic and prepacked plan results.
+- [`rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json`](rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json):
+  clean public-operator evidence for the newly admitted first-stage LTX down
+  shape.
+- [`rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json`](rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json)
+  and [`rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json`](rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json):
+  clean explicit prepacking results for the first-stage down and low-envelope
+  up LTX shapes.
