@@ -20,6 +20,7 @@ from rdna3_fastmm.runtime import (
     PackedRight,
     PackedWeight,
     Rank7Plan,
+    Rank48Plan,
     Rank49Plan,
     Rank343Plan,
     Workspace,
@@ -28,7 +29,7 @@ from rdna3_fastmm.external_mm import rdna3_rank49_dynamic_v1_out
 from rdna3_fastmm.linear import rdna3_linear, rdna3_rank7_linear
 
 
-LinearPlan = Rank7Plan | Rank49Plan
+LinearPlan = Rank7Plan | Rank48Plan | Rank49Plan
 Plan = LinearPlan | Rank343Plan
 ARTIFACTS = {
     "rank7": (
@@ -40,6 +41,11 @@ ARTIFACTS = {
         Path("certificates/4x4x4_rank49_159add/certificate.json"),
         Path("src/rdna3_fastmm/generated/rank49_4x4x4.py"),
         Rank49Plan,
+    ),
+    "rank48": (
+        Path("certificates/4x4x4_rank48_accurate/certificate.json"),
+        Path("src/rdna3_fastmm/generated/rank48_4x4x4.py"),
+        Rank48Plan,
     ),
     "rank343": (
         Path("certificates/8x8x8_rank343_1661add/certificate.json"),
@@ -396,14 +402,18 @@ def benchmark(
     )
     if operator not in {"mm", "linear"}:
         raise ValueError("operator must be mm or linear")
-    if operator == "linear" and algorithm not in LINEAR_OPERATORS:
-        raise ValueError("linear benchmarking requires rank7 or rank49")
     if operator == "linear" and any(
         mode not in {"dynamic", "prepacked"} for mode in modes
     ):
         raise ValueError("linear benchmarking supports dynamic and prepacked modes")
     if linear_implementation not in {"plan", "triton-op"}:
         raise ValueError("linear implementation must be plan or triton-op")
+    if (
+        operator == "linear"
+        and linear_implementation == "triton-op"
+        and algorithm not in LINEAR_OPERATORS
+    ):
+        raise ValueError("rank48 Linear benchmarking requires the plan implementation")
     if (
         operator == "linear"
         and "prepacked" in modes
@@ -413,7 +423,7 @@ def benchmark(
             "prepacked Linear benchmarking requires the plan implementation"
         )
     if operator == "linear":
-        if not isinstance(plan, (Rank7Plan, Rank49Plan)):
+        if not isinstance(plan, (Rank7Plan, Rank48Plan, Rank49Plan)):
             raise AssertionError("linear plan was not initialized")
         recommendations = {
             "dynamic": plan.is_linear_recommended(has_bias=linear_bias),
@@ -494,7 +504,10 @@ def benchmark(
 
         def run_dynamic() -> None:
             if operator == "linear":
-                if not isinstance(plan, (Rank7Plan, Rank49Plan)) or weight is None:
+                if (
+                    not isinstance(plan, (Rank7Plan, Rank48Plan, Rank49Plan))
+                    or weight is None
+                ):
                     raise AssertionError("linear plan was not initialized")
                 if linear_implementation == "triton-op":
                     outputs["candidate_dynamic"] = LINEAR_OPERATORS[algorithm](
@@ -536,7 +549,10 @@ def benchmark(
             (rows, columns), device=device, dtype=dtype
         )
         if operator == "linear":
-            if not isinstance(plan, (Rank7Plan, Rank49Plan)) or weight is None:
+            if (
+                not isinstance(plan, (Rank7Plan, Rank48Plan, Rank49Plan))
+                or weight is None
+            ):
                 raise AssertionError("linear plan was not initialized")
             packed_operand, packing = measure_packing(
                 lambda: plan.pack_weight(weight, max_free_memory_fraction=1.0)
@@ -551,9 +567,9 @@ def benchmark(
 
         def run_prepacked() -> None:
             if operator == "linear":
-                if not isinstance(plan, (Rank7Plan, Rank49Plan)) or not isinstance(
-                    packed_operand, PackedWeight
-                ):
+                if not isinstance(
+                    plan, (Rank7Plan, Rank48Plan, Rank49Plan)
+                ) or not isinstance(packed_operand, PackedWeight):
                     raise AssertionError("packed Linear weight was not initialized")
                 outputs["candidate_prepacked"] = plan.run_linear_packed(
                     left,
@@ -680,7 +696,7 @@ def benchmark(
                 "packed_right_bytes": plan.packed_right_bytes,
                 "packed_weight_bytes": (
                     plan.packed_weight_bytes
-                    if isinstance(plan, (Rank7Plan, Rank49Plan))
+                    if isinstance(plan, (Rank7Plan, Rank48Plan, Rank49Plan))
                     else None
                 ),
             },

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "n": [4, 4, 4],
+  "m": 48,
+  "domain": "dyadic-rational",
+  "input_order": "row-major",
+  "output_order": "row-major",
+  "programs": {
+    "u": "left.slp",
+    "v": "right.slp",
+    "w": "output.slp"
+  },
+  "complexity": {
+    "u": 84,
+    "v": 76,
+    "w": 124
+  },
+  "source": {
+    "paper": "https://arxiv.org/abs/2603.18699v3",
+    "repository": "https://github.com/jgdumas/Fast-Matrix-Multiplication",
+    "commit": "8bb354d63061504d1a712efafc8d06a0e8fa3f07",
+    "license": "CeCILL-B_V1"
+  }
+}

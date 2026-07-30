@@ -5,7 +5,12 @@ from types import ModuleType
 import torch
 import triton
 
-from rdna3_fastmm.generated import rank7_2x2x2, rank49_4x4x4, rank343_8x8x8
+from rdna3_fastmm.generated import (
+    rank7_2x2x2,
+    rank48_4x4x4,
+    rank49_4x4x4,
+    rank343_8x8x8,
+)
 
 
 def _validate_generated_module(
@@ -27,6 +32,12 @@ _validate_generated_module(
     (2, 2, 2),
     7,
     "b374fcc797ea014994453b7502625e24f70ca2f1dcf1bdbe74a716342bfefb1e",
+)
+_validate_generated_module(
+    rank48_4x4x4,
+    (4, 4, 4),
+    48,
+    "c7103a1165af22d4e1a417607e9618b0bbae1b69e0c48ed7fa2a5aba26a3bcb7",
 )
 _validate_generated_module(
     rank49_4x4x4,
@@ -806,6 +817,30 @@ class Rank7Plan(_LinearPlan):
         (4_608, 12_288): WeightTransformConfig(4, 1_024, 4),
         (12_288, 4_608): WeightTransformConfig(8, 512, 4),
         (16_384, 4_096): WeightTransformConfig(4, 1_024, 4),
+    }
+
+
+class Rank48Plan(_LinearPlan):
+    algorithm = "rank48-accurate-v1"
+    generated = rank48_4x4x4
+    rank = rank48_4x4x4.RANK
+    scheme_size = rank48_4x4x4.DIMENSIONS[0]
+    precision_pairs = frozenset({(torch.bfloat16, torch.float16)})
+    dynamic_shapes = frozenset()
+    prepacked_shapes = frozenset()
+    linear_shape_families = ()
+    prepacked_linear_shape_families = (
+        LinearShapeFamily(8_214, 8_214, 4_608, 12_288, False),
+        LinearShapeFamily(9_216, 9_216, 4_608, 12_288, False),
+        LinearShapeFamily(8_214, 8_214, 12_288, 4_608, False),
+        LinearShapeFamily(9_216, 9_216, 12_288, 4_608, False),
+        LinearShapeFamily(8_192, 8_192, 8_192, 8_192, False),
+    )
+    default_transform_config = ElementTransformConfig(1_024, 8)
+    transform_configs = {}
+    default_weight_transform_config = WeightTransformConfig(2, 1_024, 4)
+    weight_transform_configs = {
+        (12_288, 4_608): WeightTransformConfig(8, 128, 4),
     }
 
 
