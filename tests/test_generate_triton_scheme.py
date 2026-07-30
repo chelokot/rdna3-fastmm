@@ -198,6 +198,16 @@ def test_checked_in_rank_7_module_matches_generator() -> None:
     assert ast.parse(generated)
 
 
+def test_checked_in_rank_23_research_module_matches_generator() -> None:
+    certificate = Path("certificates/research/3x3x3_rank23_58add/certificate.json")
+    generated = generate_module(certificate)
+
+    assert (
+        generated == Path("research/prototypes/generated_rank23_3x3x3.py").read_text()
+    )
+    assert ast.parse(generated)
+
+
 def test_checked_in_rank_7_sparse_fusion_module_matches_generator() -> None:
     certificate = Path("certificates/2x2x2_rank7_15add/certificate.json")
     generated = generate_sparse_research_output_fusion_module(certificate)

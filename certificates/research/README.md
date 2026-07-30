@@ -5,3 +5,6 @@ kernel candidates. They are excluded from runtime imports, recommendation
 tables, and dispatch. A candidate must receive a separate production
 certificate entry and measured dispatch evidence before it can leave this
 directory.
+
+- [`3x3x3_rank23_58add`](3x3x3_rank23_58add/) backs the rejected rank-23
+  real-model Linear screen recorded as E026.

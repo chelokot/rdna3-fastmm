@@ -16,6 +16,7 @@ from typing import cast
 import torch
 import triton
 
+from benchmarks.protocol import BLAS_BACKENDS
 from rdna3_fastmm.runtime import (
     PackedRight,
     Rank7Plan,
@@ -370,10 +371,12 @@ def benchmark(
     operator: str = "mm",
     linear_bias: bool = True,
     linear_implementation: str = "triton-op",
+    blas_backend: str = "default",
 ) -> dict[str, object]:
     dirty = bool(git_output("status", "--porcelain"))
     if dirty and not allow_dirty:
         raise RuntimeError("refusing to benchmark a dirty tree without --allow-dirty")
+    selected_blas_backend = torch.backends.cuda.preferred_blas_library(blas_backend)
     device = torch.device("cuda", torch.cuda.current_device())
     certificate_path, generated_module_path, plan_type = ARTIFACTS[algorithm]
     plan = plan_type(
@@ -576,6 +579,7 @@ def benchmark(
             "hip": torch.version.hip,
             "triton": triton.__version__,
             "algorithm": plan.algorithm,
+            "blas_backend": str(selected_blas_backend),
             "linear_implementation": (
                 linear_implementation if operator == "linear" else None
             ),
@@ -655,6 +659,11 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=9)
     parser.add_argument("--tile-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--blas-backend",
+        choices=BLAS_BACKENDS,
+        default="default",
+    )
     parser.add_argument("--max-memory-fraction", type=float, default=0.75)
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--allow-unrecommended", action="store_true")
@@ -690,6 +699,7 @@ def main() -> None:
         arguments.operator,
         not arguments.no_bias,
         arguments.linear_implementation,
+        arguments.blas_backend,
     )
     serialized = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if arguments.output is None:

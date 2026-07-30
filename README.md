@@ -221,6 +221,7 @@ python -m benchmarks.run_corpus --list
 python -m benchmarks.run_corpus \
   --case ideogram4-local-8214-mlp-up \
   --algorithm rank7 \
+  --blas-backend hipblas \
   --output-directory /tmp/rdna3-fastmm-results
 ```
 
@@ -228,7 +229,10 @@ The benchmark refuses a dirty tree or an unmeasured runtime by default. It
 rotates execution order, retains raw timings, accounts for memory, and validates
 a tile in every output macroblock against CPU FP32. The corpus runner requires
 explicit case IDs, caps each case at 30% of free GPU memory by default, and
-terminates an individual subprocess after 180 seconds.
+terminates an individual subprocess after 180 seconds. Reports record the
+effective BLAS backend, not only the environment that requested it. Repeat a
+case with `--blas-backend hipblaslt` in its own subprocess when establishing a
+best-native control.
 
 Run all CPU-safe checks with:
 

@@ -442,3 +442,41 @@ belong in `benchmarks/results/`.
 - Decision: keep the one-call hipBLAS BMM and do not add product chunking or a
   backend mutation. Future corpus reports should record the preferred BLAS
   backend and include a best-native control before broad performance claims.
+
+### E026 — Rank-23 `3×3×3` real-shape screen: rejected
+
+- A verified ternary `3×3×3` rank-23 circuit executes `23/27 = 85.19%` of
+  classical multiplication, compared with `7/8 = 87.5%` for rank-7. Its
+  transformed workspace is larger because 23 product planes cover one ninth of
+  the output each, rather than seven planes covering one quarter.
+- The bounded RX 7900 XTX screen used Ideogram
+  `4704×4608×12288`, BF16 inputs and output, FP16 leaves, hipBLAS, no bias, one
+  warmup, and three rotated measured rounds. It intentionally used an
+  optimistic rank-23 plan with a reused workspace while the rank-7 control used
+  the public allocating operator.
+
+| Candidate | Median | Relative to rank-7 | Error ratio vs BF16 |
+|---|---:|---:|---:|
+| Rank-23 optimistic plan | `6.016 ms` | `0.989×` | `1.127×` |
+| Rank-7 public operator | `5.950 ms` | `1.000×` | `1.093×` |
+
+- Rank-23 workspace was 695,631,872 bytes, versus 476,356,608 bytes for
+  rank-7 at this shape (`1.46×`). The complete short screen peaked at
+  1,826,922,496 allocated bytes. Neither candidate produced a sampled
+  non-finite value.
+- Decision: retain the exact certificate, generated Triton transforms, and
+  bounded benchmark as reproducible negative evidence. Do not build a public
+  rank-23 operator or expand the sweep: it loses even with a more favorable
+  allocation contract, while increasing memory and sampled error.
+
+### E027 — Process-isolated BLAS provenance: accepted
+
+- The canonical benchmark and corpus runner now accept an explicit
+  `default`, `hipblas`, or `hipblaslt` preference. The corpus runner forwards it
+  into each already isolated case subprocess.
+- Every new report records the effective backend returned by PyTorch in
+  `runtime.blas_backend`, while retaining the requesting environment for
+  provenance.
+- Decision: use separate hipBLAS and hipBLASLt reports when a best-native
+  control matters. Keep runtime dispatch backend-neutral; this switch exists
+  only in the benchmark process.

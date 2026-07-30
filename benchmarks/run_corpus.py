@@ -6,11 +6,13 @@ import sys
 from typing import cast
 
 from benchmarks.corpus import DEFAULT_CORPUS_PATH, GemmCase, load_corpus
+from benchmarks.protocol import BLAS_BACKENDS
 
 
 @dataclass(frozen=True)
 class RunnerConfig:
     algorithm: str
+    blas_backend: str
     output_directory: Path
     warmups: int
     rounds: int
@@ -28,6 +30,8 @@ def benchmark_command(
         "benchmarks/benchmark.py",
         "--algorithm",
         config.algorithm,
+        "--blas-backend",
+        config.blas_backend,
         "--operator",
         "linear",
         "--linear-implementation",
@@ -63,6 +67,11 @@ def parse_arguments() -> tuple[Path, tuple[str, ...] | None, RunnerConfig | None
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_PATH)
     parser.add_argument("--algorithm", choices=("rank7", "rank49"), default="rank49")
+    parser.add_argument(
+        "--blas-backend",
+        choices=BLAS_BACKENDS,
+        default="default",
+    )
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--list", action="store_true")
     selection.add_argument("--case", action="append")
@@ -94,6 +103,7 @@ def parse_arguments() -> tuple[Path, tuple[str, ...] | None, RunnerConfig | None
         case_ids,
         RunnerConfig(
             algorithm=arguments.algorithm,
+            blas_backend=arguments.blas_backend,
             output_directory=output_directory,
             warmups=arguments.warmups,
             rounds=arguments.rounds,
