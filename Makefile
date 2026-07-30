@@ -28,3 +28,7 @@ certificates:
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/4x4x4_rank49_159add/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/8x8x8_rank343_1661add/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/research/3x3x3_rank23_58add/certificate.json
+	$(PYTHON) -m tools.verify_reduced_scheme certificates/research/3x3x3_rank23_56add/certificate.json
+	$(PYTHON) -m tools.verify_reduced_scheme certificates/research/3x3x3_rank23_55add/certificate.json
+	$(PYTHON) -m tools.verify_reduced_scheme certificates/research/3x3x4_rank29_92add/certificate.json
+	$(PYTHON) -m tools.verify_reduced_scheme certificates/research/4x6x6_rank105_430add/certificate.json

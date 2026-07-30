@@ -208,6 +208,48 @@ def test_checked_in_rank_23_research_module_matches_generator() -> None:
     assert ast.parse(generated)
 
 
+def test_checked_in_rank_23_56_addition_research_module_matches_generator() -> None:
+    certificate = Path("certificates/research/3x3x3_rank23_56add/certificate.json")
+    generated = generate_module(certificate)
+
+    assert (
+        generated
+        == Path("research/prototypes/generated_rank23_56add_3x3x3.py").read_text()
+    )
+    assert ast.parse(generated)
+
+
+def test_checked_in_rank_23_55_addition_research_module_matches_generator() -> None:
+    certificate = Path("certificates/research/3x3x3_rank23_55add/certificate.json")
+    generated = generate_module(certificate)
+
+    assert (
+        generated
+        == Path("research/prototypes/generated_rank23_55add_3x3x3.py").read_text()
+    )
+    assert ast.parse(generated)
+
+
+def test_checked_in_rank_29_research_module_matches_generator() -> None:
+    certificate = Path("certificates/research/3x3x4_rank29_92add/certificate.json")
+    generated = generate_module(certificate)
+
+    assert (
+        generated == Path("research/prototypes/generated_rank29_3x3x4.py").read_text()
+    )
+    assert ast.parse(generated)
+
+
+def test_checked_in_rank_105_research_module_matches_generator() -> None:
+    certificate = Path("certificates/research/4x6x6_rank105_430add/certificate.json")
+    generated = generate_module(certificate)
+
+    assert (
+        generated == Path("research/prototypes/generated_rank105_4x6x6.py").read_text()
+    )
+    assert ast.parse(generated)
+
+
 def test_checked_in_rank_7_sparse_fusion_module_matches_generator() -> None:
     certificate = Path("certificates/2x2x2_rank7_15add/certificate.json")
     generated = generate_sparse_research_output_fusion_module(certificate)
