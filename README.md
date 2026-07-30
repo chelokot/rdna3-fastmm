@@ -8,9 +8,9 @@ PyTorch and the platform GEMM libraries.
 The current backend is deliberately narrow: inference-only, contiguous tensors,
 `gfx1100`, and measured large-shape families on an RX 7900 XTX. The practical
 path accepts the native `torch.nn.functional.linear` contract: BF16 input,
-contiguous `weight[N,K]`, optional bias, and FP16 rank-7 or rank-49 leaf
-products. It is not a numerically identical replacement for PyTorch GEMM and
-does not claim a win outside its measured dispatch policy.
+contiguous `weight[N,K]`, optional bias, and FP16 rank-7, rank-48, or rank-49
+leaf products. It is not a numerically identical replacement for PyTorch GEMM
+and does not claim a win outside its measured dispatch policy.
 
 ## Real-model linear result
 
@@ -78,6 +78,35 @@ cases and after three uses at `M=720`. Dynamic and prepacked outputs were
 bitwise identical. Releasing transformed inputs before output allocation also
 reduced the public operator's peak temporary allocation by 115,605,504 bytes
 (`19.49%`) without a measured latency loss.
+
+## Exact rank-48 prepacked result
+
+The prepacked plan also supports the exact rational `⟨4,4,4⟩` rank-48
+algorithm published in July 2026. Clean results at commit
+`bc2eec7abbe311421af895b7e7be53d478c3c4a5` compare preallocated native BF16
+`torch.mm` against rank-7, rank-49, and rank-48 plans. Every FastMM control
+reuses its transformed weight, workspace, and output.
+
+| Shape `M×K×N` | Native BF16 | Best previous plan | Rank-48 | Gain over previous | Speedup over native |
+|---|---:|---:|---:|---:|---:|
+| `8214×4608×12288` | 11.951 ms | 8.320 ms | 7.971 ms | **4.37%** | **1.499×** |
+| `9216×4608×12288` | 14.262 ms | 9.000 ms | 8.636 ms | **4.22%** | **1.652×** |
+| `8214×12288×4608` | 15.670 ms | 9.082 ms | 8.938 ms | **1.61%** | **1.753×** |
+| `9216×12288×4608` | 16.988 ms | 10.070 ms | 9.802 ms | **2.74%** | **1.733×** |
+| `8192×8192×8192` | 14.148 ms | 9.381 ms | 8.999 ms | **4.24%** | **1.572×** |
+
+The verifier expands the three straight-line programs over exact
+`fractions.Fraction` values and checks all 4096 Brent-tensor coordinates before
+generation. The circuit needs 48 leaf products and 284 transform operations,
+so its extra transform work outweighs the saved leaf at smaller or dynamic
+shapes. The recommendation gate therefore contains only the five exact
+no-bias, BF16-input/FP16-leaf, prepacked shapes above. It does not expose a
+dynamic path or an automatic compile rewrite.
+
+Sampled relative L2 error was `0.00180..0.00196`, at most `1.165×` the native
+BF16 error, with no non-finite values. A rank-48 packed weight occupies exactly
+three times the native BF16 weight bytes, slightly less than rank-49's
+`3.0625×`.
 
 ## Original square result
 
@@ -176,6 +205,10 @@ application, in-place weight mutation, or device offload/reload. Plans with
 different row counts can share it when the algorithm, `(K,N)`, device, and
 dtypes match. On the measured even-dimensional shapes, Rank-7 packing occupies
 1.75 times the native weight bytes.
+
+For the five exact rank-48 results above, construct `Rank48Plan` instead and
+check the same prepacked recommendation gate. Rank-48 is intentionally not
+recommended without `prepacked_weight=True`.
 
 ## PyTorch integration
 
