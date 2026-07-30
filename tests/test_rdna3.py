@@ -10,6 +10,7 @@ from rdna3_fastmm.runtime import (
     ElementTransformConfig,
     MatrixShape,
     Rank7Plan,
+    Rank48Plan,
     Rank49Plan,
     Rank343Plan,
     WeightTransformConfig,
@@ -238,6 +239,88 @@ def test_rank_7_prepacked_weight_adds_only_measured_shape() -> None:
 
 
 @pytest.mark.parametrize(
+    "shape",
+    (
+        (8_214, 4_608, 12_288),
+        (9_216, 4_608, 12_288),
+        (8_214, 12_288, 4_608),
+        (9_216, 12_288, 4_608),
+        (8_192, 8_192, 8_192),
+    ),
+)
+def test_rank_48_prepacked_weight_admits_only_measured_shapes(
+    shape: tuple[int, int, int],
+) -> None:
+    assert not Rank48Plan.has_measured_linear_win(shape, has_bias=False)
+    assert Rank48Plan.has_measured_linear_win(
+        shape,
+        has_bias=False,
+        prepacked_weight=True,
+    )
+    assert not Rank48Plan.has_measured_linear_win(
+        shape,
+        has_bias=True,
+        prepacked_weight=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    (
+        (8_213, 4_608, 12_288),
+        (8_704, 4_608, 12_288),
+        (9_217, 4_608, 12_288),
+        (8_213, 12_288, 4_608),
+        (8_704, 12_288, 4_608),
+        (9_217, 12_288, 4_608),
+        (8_191, 8_192, 8_192),
+        (8_193, 8_192, 8_192),
+    ),
+)
+def test_rank_48_unmeasured_prepacked_shapes_are_ineligible(
+    shape: tuple[int, int, int],
+) -> None:
+    assert not Rank48Plan.has_measured_linear_win(
+        shape,
+        has_bias=False,
+        prepacked_weight=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("inner", "columns", "transform", "weight"),
+    (
+        (
+            4_608,
+            12_288,
+            ElementTransformConfig(1_024, 8),
+            WeightTransformConfig(2, 1_024, 4),
+        ),
+        (
+            8_192,
+            8_192,
+            ElementTransformConfig(1_024, 8),
+            WeightTransformConfig(2, 1_024, 4),
+        ),
+        (
+            12_288,
+            4_608,
+            ElementTransformConfig(1_024, 8),
+            WeightTransformConfig(8, 128, 4),
+        ),
+    ),
+)
+def test_rank_48_selects_measured_transform_config(
+    inner: int,
+    columns: int,
+    transform: ElementTransformConfig,
+    weight: WeightTransformConfig,
+) -> None:
+    assert Rank48Plan.transform_config(inner, columns) == transform
+    assert Rank48Plan.weight_transform_config(inner, columns) == weight
+
+
+@pytest.mark.parametrize(
     ("inner", "columns", "expected"),
     (
         (3072, 12288, WeightTransformConfig(2, 1024, 4)),
@@ -308,6 +391,11 @@ def test_rank_7_selects_measured_transform_config(
 def test_rank_49_plan_rejects_cpu_device() -> None:
     with pytest.raises(ValueError, match="ROCm"):
         Rank49Plan(4, 4, 4, torch.device("cpu"))
+
+
+def test_rank_48_plan_rejects_cpu_device() -> None:
+    with pytest.raises(ValueError, match="ROCm"):
+        Rank48Plan(4, 4, 4, torch.device("cpu"))
 
 
 def test_rank_7_plan_rejects_cpu_device() -> None:
@@ -394,6 +482,44 @@ def test_rank_49_bfloat16_inputs_with_float16_leaves_have_bounded_error() -> Non
     assert torch.isfinite(candidate).all()
     assert candidate_error / reference_norm < 0.005
     assert baseline_error / reference_norm < 0.005
+
+
+@pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")
+def test_rank_48_linear_dynamic_and_prepacked_have_bounded_error() -> None:
+    torch.manual_seed(17)
+    shape = (257, 263, 269)
+    device = torch.device("cuda")
+    input_tensor = torch.randn(shape[:2], device=device, dtype=torch.bfloat16)
+    weight = torch.randn((shape[2], shape[1]), device=device, dtype=torch.bfloat16)
+    reference = input_tensor.float() @ weight.float().T
+    plan = Rank48Plan(
+        *shape,
+        device=device,
+        dtype=torch.bfloat16,
+        compute_dtype=torch.float16,
+    )
+    dynamic_workspace = plan.allocate_workspace(max_free_memory_fraction=0.1)
+    dynamic = plan.run_linear(input_tensor, weight, dynamic_workspace)
+    packed_weight = plan.pack_weight(weight, max_free_memory_fraction=0.1)
+    packed_workspace = plan.allocate_workspace(
+        max_free_memory_fraction=0.1,
+        prepacked_right=True,
+    )
+    packed = plan.run_linear_packed(
+        input_tensor,
+        packed_weight,
+        packed_workspace,
+    )
+    relative_error = torch.linalg.vector_norm(
+        dynamic.float() - reference
+    ) / torch.linalg.vector_norm(reference)
+
+    assert torch.isfinite(dynamic).all()
+    assert relative_error < 0.005
+    assert torch.equal(dynamic, packed)
+    assert plan.workspace_bytes == 48 * (65 * 66 + 66 * 68 + 65 * 68) * 2
+    assert plan.prepacked_workspace_bytes == 48 * (65 * 66 + 65 * 68) * 2
+    assert plan.packed_weight_bytes == 48 * 66 * 68 * 2
 
 
 @pytest.mark.skipif(not has_tested_rdna3_runtime(), reason="requires tested gfx1100")

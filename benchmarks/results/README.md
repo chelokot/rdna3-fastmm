@@ -48,3 +48,11 @@ hashes, and FP32 correctness samples.
   and [`rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json`](rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json):
   clean explicit prepacking results for the first-stage down and low-envelope
   up LTX shapes.
+- [`rx7900xtx-rank48-prepacked-ideogram8214-up-bc2eec7.json`](rx7900xtx-rank48-prepacked-ideogram8214-up-bc2eec7.json),
+  [`rx7900xtx-rank48-prepacked-ideogram9216-up-bc2eec7.json`](rx7900xtx-rank48-prepacked-ideogram9216-up-bc2eec7.json),
+  [`rx7900xtx-rank48-prepacked-ideogram8214-down-bc2eec7.json`](rx7900xtx-rank48-prepacked-ideogram8214-down-bc2eec7.json),
+  and [`rx7900xtx-rank48-prepacked-ideogram9216-down-bc2eec7.json`](rx7900xtx-rank48-prepacked-ideogram9216-down-bc2eec7.json):
+  clean exact rank-48 Ideogram prepacked wins over both rank-7 and rank-49
+  controls.
+- [`rx7900xtx-rank48-prepacked-square8192-bc2eec7.json`](rx7900xtx-rank48-prepacked-square8192-bc2eec7.json):
+  clean exact rank-48 prepacked `8192³` win over rank-49.

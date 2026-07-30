@@ -25,5 +25,6 @@ hashes:
 
 certificates:
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/2x2x2_rank7_15add/certificate.json
+	$(PYTHON) -m tools.verify_slp_scheme certificates/4x4x4_rank48_accurate/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/4x4x4_rank49_159add/certificate.json
 	$(PYTHON) -m tools.verify_reduced_scheme certificates/8x8x8_rank343_1661add/certificate.json

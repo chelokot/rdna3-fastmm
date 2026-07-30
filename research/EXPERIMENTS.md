@@ -499,3 +499,47 @@ belong in `benchmarks/results/`.
   - [`rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-down-4992-both-da03834.json);
   - [`rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-down-4992-triton-da03834.json);
   - [`rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json`](../benchmarks/results/rx7900xtx-rank7-linear-ltx-up-720-prepacked-da03834.json).
+
+### E027 — Exact rank-48 rational SLP: accepted for five prepacked shapes
+
+- The source is revision 3 of
+  [A more accurate rational non-commutative algorithm for multiplying 4x4
+  matrices using 48 multiplications](https://arxiv.org/abs/2603.18699v3),
+  revised on 2026-07-29. The exact `L`, `R`, and `P` straight-line programs are
+  pinned to upstream commit
+  [`8bb354d63061504d1a712efafc8d06a0e8fa3f07`](https://github.com/jgdumas/Fast-Matrix-Multiplication/commit/8bb354d63061504d1a712efafc8d06a0e8fa3f07).
+- A constrained parser expands every signal over exact rational coefficients.
+  Verification checks the complete 4096-coordinate Brent tensor before Triton
+  generation. The three programs use `(80,68,108)` additions and `(4,8,16)`
+  dyadic scalings, or 284 transform operations in total, versus 159 additions
+  for the existing rank-49 circuit.
+- The selected rank-48 element transform uses 1024 positions and eight warps.
+  Native-weight packing uses `2×1024/4` for up and square shapes and
+  `8×128/4` for the reverse projection.
+- Clean commit: `bc2eec7abbe311421af895b7e7be53d478c3c4a5`. The control reuses output,
+  workspace, and packed weight for rank-7, rank-49, and rank-48, alternates all
+  four operations for seven measured rounds after one warmup, and uses
+  preallocated `torch.mm` as the native BF16 baseline.
+
+| Shape | Native BF16 | Rank-7 | Rank-49 | Rank-48 | Gain over best current |
+|---|---:|---:|---:|---:|---:|
+| `8214×4608×12288` | 11.951 ms | 8.489 ms | 8.320 ms | 7.971 ms | `1.044×` |
+| `9216×4608×12288` | 14.262 ms | 9.240 ms | 9.000 ms | 8.636 ms | `1.042×` |
+| `8214×12288×4608` | 15.670 ms | 9.410 ms | 9.082 ms | 8.938 ms | `1.016×` |
+| `9216×12288×4608` | 16.988 ms | 10.310 ms | 10.070 ms | 9.802 ms | `1.027×` |
+| `8192×8192×8192` | 14.148 ms | 9.450 ms | 9.381 ms | 8.999 ms | `1.042×` |
+
+- Sampled rank-48 relative L2 error was `1.80e-3..1.96e-3`, at most `1.165×`
+  the native BF16 error. No non-finite values were observed.
+- Negative screens remain outside dispatch: dynamic rank-48 did not
+  consistently beat rank-7; prepacked `M=5120` was too close to rank-49;
+  `M=4704` and the tested LTX shapes lost to rank-7. Intervening unmeasured row
+  counts are also excluded rather than inferred from the endpoints.
+- Decision: expose rank-48 only through the explicit prepacked plan at the five
+  exact no-bias shapes above. Its packed weight is `48/16 = 3×` the native
+  weight size. Raw reports:
+  - [`rx7900xtx-rank48-prepacked-ideogram8214-up-bc2eec7.json`](../benchmarks/results/rx7900xtx-rank48-prepacked-ideogram8214-up-bc2eec7.json);
+  - [`rx7900xtx-rank48-prepacked-ideogram9216-up-bc2eec7.json`](../benchmarks/results/rx7900xtx-rank48-prepacked-ideogram9216-up-bc2eec7.json);
+  - [`rx7900xtx-rank48-prepacked-ideogram8214-down-bc2eec7.json`](../benchmarks/results/rx7900xtx-rank48-prepacked-ideogram8214-down-bc2eec7.json);
+  - [`rx7900xtx-rank48-prepacked-ideogram9216-down-bc2eec7.json`](../benchmarks/results/rx7900xtx-rank48-prepacked-ideogram9216-down-bc2eec7.json);
+  - [`rx7900xtx-rank48-prepacked-square8192-bc2eec7.json`](../benchmarks/results/rx7900xtx-rank48-prepacked-square8192-bc2eec7.json).

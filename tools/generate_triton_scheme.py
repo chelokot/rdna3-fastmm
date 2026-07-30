@@ -20,7 +20,8 @@ OutputMode = Literal["scalar", "mfma", "both"]
 class ScheduledExpression(TypedDict):
     kind: ExpressionKind
     index: int
-    terms: list[LinearTerm]
+    dependencies: list[int]
+    source: str
 
 
 def schedule_expressions(
@@ -43,14 +44,22 @@ def schedule_expressions(
                 ScheduledExpression(
                     kind="output",
                     index=output_index,
-                    terms=outputs[output_index],
+                    dependencies=[term["index"] for term in outputs[output_index]],
+                    source=format_expression(outputs[output_index]),
                 )
             )
             pending_outputs.remove(output_index)
 
     emit_ready_outputs()
     for gate_index, terms in enumerate(gates):
-        schedule.append(ScheduledExpression(kind="gate", index=gate_index, terms=terms))
+        schedule.append(
+            ScheduledExpression(
+                kind="gate",
+                index=gate_index,
+                dependencies=[term["index"] for term in terms],
+                source=format_expression(terms),
+            )
+        )
         available_count += 1
         emit_ready_outputs()
     if pending_outputs:
@@ -110,9 +119,28 @@ def generate_kernel(
     output_block_rows: int,
     include_bias: bool = False,
 ) -> str:
+    return generate_scheduled_kernel(
+        name,
+        input_count,
+        block_columns,
+        schedule_expressions(input_count, gates, outputs),
+        source_kind,
+        output_block_rows,
+        include_bias,
+    )
+
+
+def generate_scheduled_kernel(
+    name: str,
+    input_count: int,
+    block_columns: int,
+    schedule: list[ScheduledExpression],
+    source_kind: SourceKind,
+    output_block_rows: int,
+    include_bias: bool = False,
+) -> str:
     if include_bias and source_kind != "products":
         raise ValueError("bias is only valid for output reconstruction")
-    schedule = schedule_expressions(input_count, gates, outputs)
     lines = [
         "@triton.jit",
         f"def {name}(",
@@ -146,8 +174,7 @@ def generate_kernel(
     )
     loaded_inputs: set[int] = set()
     for expression in schedule:
-        for term in expression["terms"]:
-            signal_index = term["index"]
+        for signal_index in expression["dependencies"]:
             if signal_index < input_count and signal_index not in loaded_inputs:
                 lines.extend(
                     input_load_lines(
@@ -155,7 +182,7 @@ def generate_kernel(
                     )
                 )
                 loaded_inputs.add(signal_index)
-        value = format_expression(expression["terms"])
+        value = expression["source"]
         if expression["kind"] == "gate":
             signal_index = input_count + expression["index"]
             lines.append(f"    signal_{signal_index} = {value}")
@@ -241,7 +268,20 @@ def generate_weight_input_kernel(
     gates: list[list[LinearTerm]],
     outputs: list[list[LinearTerm]],
 ) -> str:
-    schedule = schedule_expressions(input_count, gates, outputs)
+    return generate_scheduled_weight_input_kernel(
+        name,
+        input_count,
+        block_columns,
+        schedule_expressions(input_count, gates, outputs),
+    )
+
+
+def generate_scheduled_weight_input_kernel(
+    name: str,
+    input_count: int,
+    block_columns: int,
+    schedule: list[ScheduledExpression],
+) -> str:
     lines = [
         "@triton.jit",
         f"def {name}(",
@@ -273,14 +313,13 @@ def generate_weight_input_kernel(
     ]
     loaded_inputs: set[int] = set()
     for expression in schedule:
-        for term in expression["terms"]:
-            signal_index = term["index"]
+        for signal_index in expression["dependencies"]:
             if signal_index < input_count and signal_index not in loaded_inputs:
                 lines.extend(
                     weight_input_load_lines(signal_index, input_count, block_columns)
                 )
                 loaded_inputs.add(signal_index)
-        value = format_expression(expression["terms"])
+        value = expression["source"]
         if expression["kind"] == "gate":
             signal_index = input_count + expression["index"]
             lines.append(f"    signal_{signal_index} = {value}")
@@ -363,8 +402,7 @@ def generate_transposed_input_kernel(
     ]
     loaded_inputs: set[int] = set()
     for expression in schedule:
-        for term in expression["terms"]:
-            signal_index = term["index"]
+        for signal_index in expression["dependencies"]:
             if signal_index < input_count and signal_index not in loaded_inputs:
                 lines.extend(
                     transposed_input_load_lines(
@@ -372,7 +410,7 @@ def generate_transposed_input_kernel(
                     )
                 )
                 loaded_inputs.add(signal_index)
-        value = format_expression(expression["terms"])
+        value = expression["source"]
         if expression["kind"] == "gate":
             signal_index = input_count + expression["index"]
             lines.append(f"    signal_{signal_index} = {value}")
@@ -429,8 +467,7 @@ def generate_transposed_output_kernel(
     ]
     loaded_inputs: set[int] = set()
     for expression in schedule:
-        for term in expression["terms"]:
-            signal_index = term["index"]
+        for signal_index in expression["dependencies"]:
             if signal_index < input_count and signal_index not in loaded_inputs:
                 lines.extend(
                     [
@@ -446,7 +483,7 @@ def generate_transposed_output_kernel(
                     ]
                 )
                 loaded_inputs.add(signal_index)
-        value = format_expression(expression["terms"])
+        value = expression["source"]
         if expression["kind"] == "gate":
             signal_index = input_count + expression["index"]
             lines.append(f"    signal_{signal_index} = {value}")
